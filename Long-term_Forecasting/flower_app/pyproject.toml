@@ -1,0 +1,209 @@
+# =====================================================================
+# Flower pyproject.toml (FIXED FOR GPU + RAY + TORCH)
+# =====================================================================
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "my-flower-app"
+version = "1.0.0"
+description = ""
+license = "Apache-2.0"
+dependencies = [
+    "flwr[simulation]>=1.11.0",
+    "flwr-datasets[vision]>=0.5.0",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "zhansaya"
+
+[tool.flwr.app.components]
+serverapp = "my_flower_app.server_app:app"
+clientapp = "my_flower_app.client_app:app"
+
+[tool.flwr.app.config]
+# Dataset Parameters
+dataset-name = "custom"
+target-column = "value"
+
+# Federated Learning Parameters
+num-server-rounds = 3
+fraction-train = 0.5
+local-epochs = 2
+lr = 0.001
+batch-size = 16
+num-clients = 5
+random-seed = 2021
+
+# Strategy and Optimization Parameters
+strategy = "fedavg"
+proximal-mu = 0.01
+warmup-rounds = 3
+weight-decay = 0.01
+early-stopping = true
+early-stop-patience = 5
+
+# Time Series Forecasting Parameters
+seq-len = 336
+pred-len = 120
+label-len = 48
+
+# Model Architecture Parameters
+# Available: gpt4ts_nonlinear, gpt4ts_linear, bart_nonlinear, bart_linear,
+#            bert_nonlinear, bert_linear, llama_nonlinear, llama_linear
+model = "gpt4ts_nonlinear"
+patch-size = 4
+stride = 1
+d-model = 768
+hidden-size = 16
+kernel-size = 3
+llm-layers = 4
+enc-in = 1
+dec-in = 1
+c-out = 1
+embed-type = 0
+embed = "timeF"
+freq = "h"
+factor = 1
+n-heads = 4
+e-layers = 2
+d-layers = 1
+d-ff = 512
+distil = true
+activation = "gelu"
+output-attention = false
+fc-dropout = 0.05
+head-dropout = 0.0
+patch-len = 16
+padding-patch = "end"
+revin = 1
+affine = 0
+subtract-last = 0
+decomposition = 0
+individual = 0
+
+# LoRA Parameters
+lora-r = 8
+lora-alpha = 16
+lora-dropout = 0.0
+peft-method = "lora"
+is-pretrained = false
+
+# Regularization Parameters
+dropout = 0.15
+
+
+################################################################################
+# DEFAULT FEDERATION
+################################################################################
+
+[tool.flwr.federations]
+default = "local-simulation-5"
+
+
+################################################################################
+# LOCAL SIMULATIONS (GPU + Ray enabled)
+################################################################################
+
+####################################
+# 1 CLIENT
+####################################
+[tool.flwr.federations.local-simulation-1]
+engine = "ray"
+options.num-supernodes = 1
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+####################################
+# 2 CLIENTS
+####################################
+[tool.flwr.federations.local-simulation-2]
+engine = "ray"
+options.num-supernodes = 2
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+####################################
+# 3 CLIENTS
+####################################
+[tool.flwr.federations.local-simulation-3]
+engine = "ray"
+options.num-supernodes = 3
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+####################################
+# 4 CLIENTS
+####################################
+[tool.flwr.federations.local-simulation-4]
+engine = "ray"
+options.num-supernodes = 4
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+####################################
+# 5 CLIENTS  (DEFAULT)
+####################################
+[tool.flwr.federations.local-simulation-5]
+engine = "ray"
+options.num-supernodes = 5
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+####################################
+# 7 CLIENTS
+####################################
+[tool.flwr.federations.local-simulation-7]
+engine = "ray"
+options.num-supernodes = 7
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+####################################
+# 10 CLIENTS
+####################################
+[tool.flwr.federations.local-simulation-10]
+engine = "ray"
+options.num-supernodes = 10
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+####################################
+# Alias for backward compatibility
+####################################
+[tool.flwr.federations.local-simulation]
+engine = "ray"
+options.num-supernodes = 5
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 1.0
+options.backend.actor = { framework = "torch", device = "cuda" }
+
+
+################################################################################
+# REMOTE FEDERATION (optional)
+################################################################################
+
+[tool.flwr.federations.remote-federation]
+address = "<SUPERLINK-ADDRESS>:<PORT>"
+insecure = true

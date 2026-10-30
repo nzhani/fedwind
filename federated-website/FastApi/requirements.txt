@@ -1,0 +1,35 @@
+# Python 3.9+ required
+
+# Web Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# File Upload Support
+python-multipart>=0.0.6
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+
+# Machine Learning
+scikit-learn>=1.2.0
+# Pydantic for data validation (included with FastAPI, but explicit)
+pydantic>=2.0.0
+
+# Optional: For future ML integration
+# pandas>=2.0.0
+# numpy>=1.24.0
+# torch>=2.0.0
+# flwr>=1.5.0  # Flower federated learning framework
+
+# Development/Testing (optional)
+# pytest>=7.0.0
+# httpx>=0.25.0  # For testing async endpoints
+
+#FastAPI/Python does not automatically read .env by itself unless you use a helper package, pip install python-dotenv and pip install python-dotenv requests
+python-dotenv
+#pip install requests (Telegram HTTP requests)
+requests
+
+psycopg[binary]>=3.2.0

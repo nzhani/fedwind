@@ -1,0 +1,37 @@
+# ---- Core scientific stack (Py3.8 compatible) ----
+numpy==1.24.4
+pandas==1.5.3
+scipy==1.9.1
+scikit-learn==1.3.2
+matplotlib==3.7.5
+pillow==10.4.0
+h5py==3.10.0
+einops==0.7.0
+PyYAML==6.0.1
+psutil==5.9.8
+regex==2024.5.15
+tqdm==4.66.4
+requests==2.32.3
+statsmodels==0.14.1
+# scikit-image: pick the last release that supports Python 3.8
+scikit-image==0.20.0
+# If you truly need this for your code:
+pytorch-wavelets==1.3.0
+PyWavelets==1.4.1
+
+# ---- PyTorch (CUDA 11.8 wheels; do NOT pin nvidia-* or triton) ----
+torch==2.2.*
+torchvision==0.17.*
+torchaudio==2.2.*
+
+# ---- Hugging Face + LoRA/PEFT (Py3.8-safe versions) ----
+transformers==4.38.2
+accelerate==0.28.0
+huggingface-hub==0.23.5
+tokenizers==0.15.2
+safetensors==0.4.2
+peft==0.8.2
+
+# ---- Federated Learning ----
+flwr==1.11.1
+grpcio==1.70.0

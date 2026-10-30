@@ -1,0 +1,72 @@
+# Experiment directories (44GB+)
+Long-term_Forecasting/flower_app/experiments*/
+Long-term_Forecasting/flower_app/combined_experiments*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data and models
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+*.pickle
+datasets/
+data/
+checkpoints/
+
+# Logs and runs
+runs/
+logs/
+*.log
+wandb/
+tensorboard/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reports (optional - uncomment if you don't want to track)
+MD_FILES/
+# *.md
+
+node_modules/
+.env
+
+old_experiments/
+experiments*/
+analysis_outputs*/
+Long-term_Forecasting/flower_app/configs
+
+CLAUDE.md
+program.md
+auto_results.tsv
+
+node_modules/
+.next/
+uploads/
+federated-website/FastApi/models/
+feedback/
