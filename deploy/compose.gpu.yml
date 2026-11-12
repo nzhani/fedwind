@@ -1,0 +1,18 @@
+# GPU override for the lab server: gives each client container the GPU named in .env.
+#   docker compose -f deploy/docker-compose.yml -f deploy/compose.gpu.yml up --build -d
+# Needs the NVIDIA Container Toolkit on the host. Several clients may share one GPU id.
+x-gpu: &gpu
+  driver: nvidia
+  capabilities: [gpu]
+
+services:
+  client-almaty:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_ALMATY:-0}"] }] } } }
+  client-zhezkazgan:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_ZHEZKAZGAN:-0}"] }] } } }
+  client-aktau:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_AKTAU:-0}"] }] } } }
+  client-taraz:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_TARAZ:-0}"] }] } } }
+  client-aktobe:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_AKTOBE:-0}"] }] } } }

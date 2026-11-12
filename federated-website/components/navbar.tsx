@@ -10,12 +10,19 @@ import { Button } from "@/components/ui/button"
 // Navigation links for the academic website
 const navLinks = [
   { href: "/", label: "Home" },
+  { href: "/forecast", label: "Forecast" },
+  { href: "/training", label: "Training" },
+  { href: "/experiments", label: "Experiments" },
+  { href: "/solar", label: "Solar" },
   { href: "/instructions", label: "Instructions" },
   { href: "/data-source", label: "Data Source" },
-  { href: "/architecture", label: "System Architecture" },
-  { href: "/dashboard", label: "Dashboard" },
+  { href: "/architecture", label: "Architecture" },
   { href: "/about", label: "About" },
 ]
+
+// "/training/<runId>" keeps "Training" highlighted
+const isActive = (pathname: string, href: string) =>
+  href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`)
 
 export function Navbar() {
   const pathname = usePathname()
@@ -33,14 +40,14 @@ export function Navbar() {
         </Link>
 
         {/* Desktop Navigation */}
-        <div className="hidden md:flex md:items-center md:gap-1">
+        <div className="hidden lg:flex lg:items-center lg:gap-1">
           {navLinks.map((link) => (
             <Link
               key={link.href}
               href={link.href}
               className={cn(
                 "rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                pathname === link.href
+                isActive(pathname, link.href)
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground"
               )}
@@ -54,7 +61,7 @@ export function Navbar() {
         <Button
           variant="ghost"
           size="icon"
-          className="md:hidden"
+          className="lg:hidden"
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
         >
@@ -64,7 +71,7 @@ export function Navbar() {
 
       {/* Mobile Navigation */}
       {mobileMenuOpen && (
-        <div className="border-t border-border bg-card md:hidden">
+        <div className="border-t border-border bg-card lg:hidden">
           <div className="space-y-1 px-4 py-3">
             {navLinks.map((link) => (
               <Link
@@ -73,7 +80,7 @@ export function Navbar() {
                 onClick={() => setMobileMenuOpen(false)}
                 className={cn(
                   "block rounded-md px-3 py-2 text-base font-medium transition-colors",
-                  pathname === link.href
+                  isActive(pathname, link.href)
                     ? "bg-primary/10 text-primary"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground"
                 )}

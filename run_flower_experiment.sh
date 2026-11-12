@@ -837,7 +837,7 @@ install_dependencies() {
 
     # Ensure Flower is installed
     print_info "Ensuring Flower framework is installed..."
-    pip install "flwr[simulation]>=1.11.0" "flwr-datasets[vision]>=0.5.0"
+    pip install "flwr[simulation]==1.25.0"  # newer flwr rewrites pyproject.toml on `flwr run`
 
     print_success "Dependencies installed"
 }

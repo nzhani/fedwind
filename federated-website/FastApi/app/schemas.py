@@ -293,3 +293,130 @@ class FederatedTrainingOutput(BaseModel):
     exp_dir: Optional[str] = None
     num_clients: Optional[int] = None
     federated_algorithm: Optional[str] = None
+
+
+# ===========================================================================
+# SOLAR FORECASTING  (skeleton — endpoints in app/routers/solar.py return 501)
+# ===========================================================================
+#
+# CSV Format (NASA POWER hourly data, community=RE):
+#   YEAR, MO, DY, HR, ALLSKY_SFC_SW_DWN, [CLRSKY_SFC_SW_DWN], [T2M], ...
+#   2026,  1,  1, 12, 412.6,             520.1,               [-3.2]
+#
+#   ALLSKY_SFC_SW_DWN   All-sky surface shortwave downward irradiance (GHI), Wh/m^2
+#   ALLSKY_SFC_SW_DNI   Direct normal irradiance (DNI), Wh/m^2
+#   ALLSKY_SFC_SW_DIFF  Diffuse horizontal irradiance (DHI), Wh/m^2
+#   CLRSKY_SFC_SW_DWN   Clear-sky GHI (optional, used as a physics-informed feature)
+
+class SolarTarget(str, Enum):
+    GHI = "ALLSKY_SFC_SW_DWN"
+    DNI = "ALLSKY_SFC_SW_DNI"
+    DHI = "ALLSKY_SFC_SW_DIFF"
+
+
+# 1h nowcast, day-ahead (24h), 3-day ahead (72h)
+VALID_SOLAR_PREDICTION_LENGTHS = [1, 24, 72]
+
+SOLAR_TIME_COLUMNS = {"YEAR", "MO", "DY", "HR"}
+
+
+class SolarTrainingConfig(TrainingConfig):
+    """
+    Solar training configuration.
+    Inherits every wind field (model, mode, FL algorithm, clients, rounds,
+    advanced hyper-params) and adds solar-specific options.
+    """
+    target: SolarTarget = Field(
+        default=SolarTarget.GHI,
+        description="Irradiance column to forecast: GHI | DNI | DHI",
+    )
+    prediction_length: int = Field(
+        default=24,
+        description="Forecast horizon in hourly steps (1 | 24 | 72)",
+    )
+    mask_night: bool = Field(
+        default=True,
+        description="Exclude night-time hours (zero irradiance) from loss and metrics",
+    )
+    use_clear_sky: bool = Field(
+        default=True,
+        description="Use CLRSKY_SFC_SW_DWN as an extra input feature if present",
+    )
+
+
+class SolarTrainRequest(BaseModel):
+    """Body for POST /api/solar/train."""
+    filename: str = Field(description="Saved filename from POST /api/solar/upload")
+    config: SolarTrainingConfig
+
+
+class SolarTrainingMetrics(TrainingMetrics):
+    """Wind metrics (mae, rmse) plus solar-specific scores."""
+    daytime_mae: Optional[float] = Field(default=None, description="MAE over daylight hours only")
+    skill_score: Optional[float] = Field(
+        default=None,
+        description="1 - RMSE_model / RMSE_smart_persistence (higher is better)",
+    )
+
+
+class SolarForecastPoint(ForecastPoint):
+    """Forecast point with the clear-sky envelope for the chart."""
+    clear_sky: Optional[float] = None
+
+
+class SolarTrainingResult(BaseModel):
+    """Returned by GET /api/solar/job/{job_id} when status == done."""
+    success: bool
+    message: str
+    model_name: str
+    target: SolarTarget
+    prediction_length: int
+    dropout_rate: float
+    training_time_seconds: float
+    metrics: SolarTrainingMetrics
+    forecast: List[SolarForecastPoint]
+    download_training_summary: Optional[str] = None
+    download_timing_summary: Optional[str] = None
+
+
+class SolarJobResponse(BaseModel):
+    """Returned by POST /api/solar/train."""
+    job_id: str
+    status: str
+
+
+class SolarJobStatus(BaseModel):
+    """Returned by GET /api/solar/job/{job_id}."""
+    status: str                                   # running | done | failed
+    result: Optional[SolarTrainingResult] = None
+    error: Optional[str] = None
+    current_round: int = 0
+    total_rounds: int = 0
+
+
+class SolarProgressResponse(BaseModel):
+    """Returned by GET /api/solar/job/{job_id}/progress."""
+    round: int
+    total_rounds: int
+    forecast: List[SolarForecastPoint]
+
+
+class SolarHealthResponse(BaseModel):
+    """Returned by GET /api/solar/health."""
+    status: str                                   # "skeleton" until the pipeline is wired
+    implemented: bool
+    module: str
+    targets: List[str]
+    prediction_lengths: List[int]
+    endpoints: List[str]
+
+
+class SolarTrainingInput(TrainingInput):
+    """
+    Internal bridge object: service -> solar training client.
+    Same as wind TrainingInput, plus the target column and solar flags.
+    """
+    target_column: str = Field(default=SolarTarget.GHI.value)
+    mask_night: bool = Field(default=True)
+    use_clear_sky: bool = Field(default=True)
+    seq_len: int = Field(default=168, description="One week of hourly history")

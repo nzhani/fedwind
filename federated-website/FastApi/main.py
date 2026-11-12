@@ -11,6 +11,12 @@ Endpoints:
   GET    /api/files        List uploaded files
   DELETE /api/files/{fn}   Delete a file
   POST   /api/train        Start centralized training
+  *      /api/solar/*      Solar forecasting (skeleton, returns 501)
+  GET    /api/sites        Site registry
+  GET    /api/federation   Federation status
+  *      /api/runs         Federated runs (start, stop, status, per-round metrics)
+  GET    /api/forecast     Per-site forecast from the current global model
+  *      /api/models       Promoted models per horizon
 
 Start:  uvicorn main:app --reload
 Docs:   http://localhost:8001/docs
@@ -28,6 +34,11 @@ from app.routers.train import router as train_router
 from app.routers.jobs import router as jobs_router
 from app.routers.federated import router as federated_router
 from app.routers.feedback import router as feedback_router
+from app.routers.solar import router as solar_router
+from app.routers.sites import router as sites_router
+from app.routers.runs import router as runs_router
+from app.routers.forecast import router as forecast_router
+from app.routers.models import router as models_router
 
 from app.services.feedback_db import init_feedback_db
 from app.routers import download
@@ -62,6 +73,11 @@ Frontend (CSV + config)
         {"name": "Upload", "description": "CSV file upload and management"},
         {"name": "Training", "description": "Centralized model training"},
         {"name": "Federated", "description": "Federated learning (model updates)"},
+        {"name": "Solar", "description": "Solar irradiance forecasting (skeleton - not implemented)"},
+        {"name": "Sites", "description": "Site registry"},
+        {"name": "Runs", "description": "Federated runs on the always-on federation"},
+        {"name": "Forecast", "description": "Per-site forecasts from the current global model"},
+        {"name": "Models", "description": "Promoted global models"},
     ],
 )
 
@@ -100,6 +116,11 @@ app.include_router(train_router, tags=["Training"])
 app.include_router(jobs_router, tags=["Training"])
 app.include_router(federated_router, tags=["Federated"])
 app.include_router(feedback_router, tags=["Feedback"])
+app.include_router(solar_router, tags=["Solar"])
+app.include_router(sites_router, tags=["Sites"])
+app.include_router(runs_router, tags=["Runs"])
+app.include_router(forecast_router, tags=["Forecast"])
+app.include_router(models_router, tags=["Models"])
 app.include_router(download.router)
 
 # ---------------------------------------------------------------------------
@@ -130,6 +151,11 @@ async def startup_event():
     print("  POST /api/train          Start training")
     print("  POST /api/feedback       Submit feedback")
     print("  GET  /health             Health check")
+    print("  *    /api/solar/*        Solar (skeleton, 501)")
+    print("  GET  /api/sites          Site registry")
+    print("  *    /api/runs           Federated runs")
+    print("  GET  /api/forecast       Per-site forecast")
+    print("  *    /api/models         Promoted models")
     print("=" * 56)
     print()
 

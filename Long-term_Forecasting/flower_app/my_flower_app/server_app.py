@@ -18,7 +18,9 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format= '%(asctime)s - %(levelname)s - %(message)s')
 
-from my_flower_app.task import get_default_configs, Net, trainable_state_dict
+from my_flower_app.task import DATASET_REGISTRY, Net, trainable_state_dict
+from my_flower_app.experiment import build_model_configs, seed_everything, site_names
+from my_flower_app.run_logging import RunLogger, array_bytes
 
 app = ServerApp()
 
@@ -89,6 +91,10 @@ class FedAvgWithMetrics(FedAvg):
         self.eval_history = defaultdict(list)
         # Set by outer training loop to expose the real round to eval configs.
         self.outer_round = 1
+        # Per-client metrics of the last round, keyed by partition-id (run logging)
+        self.round_train = {}
+        self.round_eval = {}
+        self.round_uplink_bytes = None
 
         # Drift tracking
         self.current_global_arrays = None
@@ -102,8 +108,38 @@ class FedAvgWithMetrics(FedAvg):
             ['ln', 'wpe', 'out_layer'] if personalize else []
         )  # LayerNorm, Positional Embeddings, and Projection Head
 
+    @staticmethod
+    def _without_skipped(replies):
+        """Drop replies of clients whose site isn't selected for this run (see client_app._skip_reply)."""
+        kept = []
+        for msg in replies:
+            if msg.has_content() and "metrics" in msg.content:
+                m = msg.content["metrics"]
+                if (m.data if hasattr(m, "data") else m).get("skipped"):
+                    continue
+            kept.append(msg)
+        return kept
+
+    @staticmethod
+    def _metrics_of(msg):
+        if not msg.has_content() or "metrics" not in msg.content:
+            return None
+        m = msg.content["metrics"]
+        return dict(m.data if hasattr(m, "data") else m)
+
     def aggregate_train(self, server_round, replies):
         """Override to collect training metrics and compute client drift."""
+        replies = self._without_skipped(list(replies))
+        self.round_train = {}
+        self.round_uplink_bytes = None
+        for msg in replies:
+            if msg.has_error():
+                continue
+            m = self._metrics_of(msg)
+            if m is not None and "partition-id" in m:
+                self.round_train[int(m["partition-id"])] = m
+            if self.round_uplink_bytes is None and msg.has_content() and "arrays" in msg.content:
+                self.round_uplink_bytes = array_bytes(msg.content["arrays"].to_torch_state_dict())
         self.avg_drift, self.max_drift = self._compute_drift(replies)
         self.client_train_losses = []
         self.client_train_durations = []
@@ -217,6 +253,12 @@ class FedAvgWithMetrics(FedAvg):
 
     def aggregate_evaluate(self, server_round, replies):
         """Override to collect evaluation metrics from clients."""
+        replies = self._without_skipped(list(replies))
+        self.round_eval = {}
+        for msg in replies:
+            m = None if msg.has_error() else self._metrics_of(msg)
+            if m is not None and "partition-id" in m:
+                self.round_eval[int(m["partition-id"])] = m
         self.client_val_losses = []
         self.client_val_maes = []
         self.client_val_rmses = []
@@ -359,6 +401,7 @@ class StatAvgWithMetrics(FedAvgWithMetrics):
         return None
 
     def aggregate_train(self, server_round, replies):
+        replies = self._without_skipped(list(replies))
         if server_round == 1:
             local_means = []
             local_vars = []
@@ -491,6 +534,7 @@ class ScaffoldWithMetrics(FedAvgWithMetrics):
 
     def aggregate_train(self, server_round, replies):
         """Update local and global control variates based on client replies."""
+        replies = self._without_skipped(list(replies))
         new_c_locals = {}
         for msg in replies:
             node_id = msg.metadata.src_node_id
@@ -539,52 +583,48 @@ def main(grid: Grid, context: Context) -> None:
     early_stop_patience: int = context.run_config.get("early-stop-patience", 5)
     early_stop_enabled: bool = context.run_config.get("early-stopping", True)
 
-    # Model selection
     model: str = context.run_config.get("model", "gpt4ts_nonlinear")
-
-    # Model architecture parameters
-    seq_len: int = context.run_config.get("seq-len", 336)
-    patch_size: int = context.run_config.get("patch-size", 4)
-    stride: int = context.run_config.get("stride", 1)
-    d_model: int = context.run_config.get("d-model", 768)
-    hidden_size: int = context.run_config.get("hidden-size", 16)
-    kernel_size: int = context.run_config.get("kernel-size", 3)
-    llm_layers: int = context.run_config.get("llm-layers", 4)
-    peft_method: str = context.run_config.get("peft-method", "lora")
-    is_pretrained: bool = context.run_config.get("is-pretrained", True)
     lora_r: int = context.run_config.get("lora-r", 8)
     lora_alpha: int = context.run_config.get("lora-alpha", 16)
-    lora_dropout: float = context.run_config.get("lora-dropout", 0.15)
-    dropout: float = context.run_config.get("dropout", 0.15)
+    patch_size: int = context.run_config.get("patch-size", 4)
+    stride: int = context.run_config.get("stride", 1)
     adalora_total_step: int = context.run_config.get("adalora-total-step", -1)
-    label_len: int = context.run_config.get("label-len", 48)
-    enc_in: int = context.run_config.get("enc-in", 1)
-    dec_in: int = context.run_config.get("dec-in", 1)
-    c_out: int = context.run_config.get("c-out", 1)
-    embed_type: int = context.run_config.get("embed-type", 0)
-    embed: str = context.run_config.get("embed", "timeF")
-    freq: str = context.run_config.get("freq", "h")
-    factor: int = context.run_config.get("factor", 1)
-    n_heads: int = context.run_config.get("n-heads", 4)
-    e_layers: int = context.run_config.get("e-layers", 2)
-    d_layers: int = context.run_config.get("d-layers", 1)
-    d_ff: int = context.run_config.get("d-ff", 512)
-    distil: bool = context.run_config.get("distil", True)
-    activation: str = context.run_config.get("activation", "gelu")
-    output_attention: bool = context.run_config.get("output-attention", False)
-    fc_dropout: float = context.run_config.get("fc-dropout", 0.05)
-    head_dropout: float = context.run_config.get("head-dropout", 0.0)
-    patch_len: int = context.run_config.get("patch-len", 16)
-    padding_patch: str = context.run_config.get("padding-patch", "end")
-    revin: int = context.run_config.get("revin", 1)
-    affine: int = context.run_config.get("affine", 0)
-    subtract_last: int = context.run_config.get("subtract-last", 0)
-    decomposition: int = context.run_config.get("decomposition", 0)
-    individual: int = context.run_config.get("individual", 0)
+
+    # Fault tolerance (FR-13): a round goes ahead when enough clients reply in time
+    min_train_clients: int = int(context.run_config.get("min-train-clients", 2))
+    round_timeout: float = float(context.run_config.get("round-timeout", 3600))
+    checkpoint_every: int = int(context.run_config.get("checkpoint-every", 5))
+    resume_from: str = context.run_config.get("resume-from", "")
+
+    seed_everything(int(context.run_config.get("random-seed", 2021)))
+
+    # Site names by partition id, for the web platform's run folder
+    partition_sites = site_names({"site-names": context.run_config.get("partition-sites", "")})
+    if not partition_sites:
+        ds = DATASET_REGISTRY.get(str(context.run_config.get("dataset-name", "")).upper())
+        partition_sites = [str(n).lower() for _, n in sorted(ds["client_names"].items())] if ds else []
+    run_logger = RunLogger.from_run_config(context.run_config, partition_sites, site_names(context.run_config))
 
     # Get experiment directory from environment variable (set by run_flower_experiment.sh)
     import os
-    exp_dir = os.environ.get("FLOWER_EXP_DIR", ".")
+    exp_dir = os.environ.get("FLOWER_EXP_DIR", run_logger.dir if run_logger else ".")
+
+    try:
+        _run(grid, context, run_logger, exp_dir, fraction_train, total_rounds, lr, bs, pred_len,
+             strategy_name, proximal_mu, early_stop_patience, early_stop_enabled, model, lora_r,
+             lora_alpha, patch_size, stride, adalora_total_step, min_train_clients, round_timeout,
+             checkpoint_every, resume_from)
+    except BaseException as e:
+        if run_logger:
+            run_logger.failed(e)
+        raise
+
+
+def _run(grid, context, run_logger, exp_dir, fraction_train, total_rounds, lr, bs, pred_len,
+         strategy_name, proximal_mu, early_stop_patience, early_stop_enabled, model, lora_r,
+         lora_alpha, patch_size, stride, adalora_total_step, min_train_clients, round_timeout,
+         checkpoint_every, resume_from):
+    import os
 
     logging.info("Loading project configuration...")
     logging.info(f"Config: rounds={total_rounds}  fraction-train={fraction_train}  lr={lr}  batch-size={bs}  pred-len={pred_len}")
@@ -597,51 +637,16 @@ def main(grid: Grid, context: Context) -> None:
 
     logging.info(f"Model: {model}")
 
-    # Initialize model with configurable parameters
-    configs = get_default_configs(
-        pred_len=pred_len,
-        model=model,
-        seq_len=seq_len,
-        patch_size=patch_size,
-        stride=stride,
-        d_model=d_model,
-        hidden_size=hidden_size,
-        kernel_size=kernel_size,
-        llm_layers=llm_layers,
-        label_len=label_len,
-        enc_in=enc_in,
-        dec_in=dec_in,
-        c_out=c_out,
-        embed_type=embed_type,
-        embed=embed,
-        freq=freq,
-        factor=factor,
-        n_heads=n_heads,
-        e_layers=e_layers,
-        d_layers=d_layers,
-        d_ff=d_ff,
-        distil=distil,
-        activation=activation,
-        output_attention=output_attention,
-        fc_dropout=fc_dropout,
-        head_dropout=head_dropout,
-        patch_len=patch_len,
-        padding_patch=padding_patch,
-        revin=revin,
-        affine=affine,
-        subtract_last=subtract_last,
-        decomposition=decomposition,
-        individual=individual,
-        lora_r=lora_r,
-        lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout,
-        dropout=dropout,
-        peft_method=peft_method,
-        is_pretrained=is_pretrained,
-        adalora_total_step=adalora_total_step,
-    )
+    # Same function as the clients, so the server's model matches theirs (bug 1)
+    configs = build_model_configs(context.run_config)
     global_model = Net(configs=configs)
     arrays = ArrayRecord(trainable_state_dict(global_model))
+    if resume_from:
+        # FR-14: continue from a checkpoint written by RunLogger.checkpoint()
+        path = resume_from if os.path.isabs(resume_from) else os.path.join(context.run_config.get("runs-dir", "."), resume_from)
+        ckpt = torch.load(path, map_location="cpu")
+        arrays = ArrayRecord(ckpt["trainable_state"])
+        logging.info(f"Resumed trainable state from {path} (round {ckpt.get('round')})")
 
     # Calculate model payload size
     model_size_mb = get_model_size_mb(arrays)
@@ -650,26 +655,35 @@ def main(grid: Grid, context: Context) -> None:
 
     # Select strategy based on configuration
     personalize = strategy_name in ("fedln", "fedper")
+    min_nodes = dict(
+        min_train_nodes=min_train_clients,
+        min_evaluate_nodes=min_train_clients,
+        min_available_nodes=min_train_clients,
+    )
     if strategy_name == "fedprox":
         strategy = FedProxWithMetrics(
             fraction_train=fraction_train,
             proximal_mu=proximal_mu,
             personalize=personalize,
+            **min_nodes,
         )
     elif strategy_name == "scaffold":
         strategy = ScaffoldWithMetrics(
             fraction_train=fraction_train,
             personalize=personalize,
+            **min_nodes,
         )
     elif strategy_name == "statavg":
         strategy = StatAvgWithMetrics(
             fraction_train=fraction_train,
             personalize=personalize,
+            **min_nodes,
         )
     else:
         strategy = FedAvgWithMetrics(
             fraction_train=fraction_train,
             personalize=personalize,
+            **min_nodes,
         )
 
     if personalize:
@@ -688,51 +702,17 @@ def main(grid: Grid, context: Context) -> None:
     early_stop_counter = 0
     best_val_loss = float("inf")
 
+    rounds_done = 0
+    stopped_early = False
     training_start_time = time.time()
     for r in range(1, total_rounds + 1):
         round_start_time = time.time()
         # CRITICAL FIX: Pass proximal_mu to clients for FedProx
+        # Model settings come from the run config on both sides (experiment.build_model_configs);
+        # the per-round message carries only what changes per round.
         train_cfg = {
             "lr": lr,
-            "model": model,
-            "pred_len": pred_len,
-            "seq_len": seq_len,
-            "patch_size": patch_size,
-            "stride": stride,
-            "d_model": d_model,
-            "hidden_size": hidden_size,
-            "kernel_size": kernel_size,
-            "llm_layers": llm_layers,
-            "peft_method": peft_method,
-            "lora_r": lora_r,
-            "lora_alpha": lora_alpha,
-            "lora_dropout": lora_dropout,
-            "dropout": dropout,
             "adalora_total_step": adalora_total_step,
-            "label_len": label_len,
-            "enc_in": enc_in,
-            "dec_in": dec_in,
-            "c_out": c_out,
-            "embed_type": embed_type,
-            "embed": embed,
-            "freq": freq,
-            "factor": factor,
-            "n_heads": n_heads,
-            "e_layers": e_layers,
-            "d_layers": d_layers,
-            "d_ff": d_ff,
-            "distil": distil,
-            "activation": activation,
-            "output_attention": output_attention,
-            "fc_dropout": fc_dropout,
-            "head_dropout": head_dropout,
-            "patch_len": patch_len,
-            "padding_patch": padding_patch,
-            "revin": revin,
-            "affine": affine,
-            "subtract_last": subtract_last,
-            "decomposition": decomposition,
-            "individual": individual,
             "server_round": r
         }
 
@@ -752,6 +732,7 @@ def main(grid: Grid, context: Context) -> None:
             initial_arrays=arrays,
             train_config=ConfigRecord(train_cfg),
             num_rounds=1,
+            timeout=round_timeout,
         )
 
         logging.info(f"[DEBUG Round {r}] result type: {type(result)}")
@@ -905,11 +886,24 @@ def main(grid: Grid, context: Context) -> None:
         })
 
 
+        if run_logger:
+            line = run_logger.round(
+                r, total_rounds, round_duration, strategy.round_train, strategy.round_eval,
+                strategy.round_uplink_bytes, int(payload_sent_mb * 1024 * 1024),
+            )
+            rounds_done = r
+            if r % checkpoint_every == 0:
+                run_logger.checkpoint(f"round_{r:04d}.pt", arrays.to_torch_state_dict(), r, line["val"])
+
         if avg_val_loss is not None and avg_val_loss < best["loss"]:
             best["loss"] = float(avg_val_loss)
             best["round"] = r
-            best["arrays"] = copy.deepcopy(arrays)
+            # ArrayRecord can't be deep-copied in Flower 1.25 (memoryview); copy through a cloned state dict
+            best["arrays"] = ArrayRecord({k: v.clone() for k, v in arrays.to_torch_state_dict().items()})
+            best["eval"] = dict(strategy.round_eval)
             logging.info(f"[ROUND {r}] Best checkpoint updated (Val Loss={avg_val_loss:.6f})")
+            if run_logger:
+                run_logger.checkpoint("best.pt", arrays.to_torch_state_dict(), r, line["val"])
 
         # Early stopping logic
         if early_stop_enabled and avg_val_loss is not None:
@@ -922,6 +916,7 @@ def main(grid: Grid, context: Context) -> None:
                 logging.info(f"[ROUND {r}] Validation loss did not improve. Early stop counter: {early_stop_counter}/{early_stop_patience}")
 
                 if early_stop_counter >= early_stop_patience:
+                    stopped_early = True
                     logging.info(f"[ROUND {r}] Early stopping triggered! No improvement for {early_stop_patience} rounds.")
                     logging.info(f"[ROUND {r}] Best validation loss: {best_val_loss:.6f} at round {best['round']}")
                     break
@@ -930,7 +925,7 @@ def main(grid: Grid, context: Context) -> None:
     total_training_time = time.time() - training_start_time
 
     logging.info(f"Total training time: {total_training_time:.2f}s ({total_training_time/60:.2f} minutes)")
-    logging.info(f"Average time per round: {total_training_time/total_rounds:.2f}s")
+    logging.info(f"Average time per round: {total_training_time/max(1, rounds_done or total_rounds):.2f}s")
 
     # CRITICAL FIX: Restore best model weights instead of using final round weights
     if best["arrays"] is not None:
@@ -939,12 +934,14 @@ def main(grid: Grid, context: Context) -> None:
     else:
         logging.warning("No best checkpoint found, using final round weights")
 
-    logging.info("Saving best model to disk...")
-    final_model_path = os.path.join(exp_dir, "final_model.pt")
     # Merge best trainable weights back into full model for a self-contained checkpoint
     global_model.load_state_dict(arrays.to_torch_state_dict(), strict=False)
-    torch.save(global_model.state_dict(), final_model_path)
-    logging.info(f"Saved best model (from round {best['round']}) to: {final_model_path}")
+    if run_logger is None:
+        logging.info("Saving best model to disk...")
+        final_model_path = os.path.join(exp_dir, "final_model.pt")
+        torch.save(global_model.state_dict(), final_model_path)
+        logging.info(f"Saved best model (from round {best['round']}) to: {final_model_path}")
+    # With run logging, checkpoints/best.pt (trainable params + run config) replaces final_model.pt.
 
     df = pd.DataFrame(results)
     training_summary_path = os.path.join(exp_dir, "training_summary.csv")
@@ -981,6 +978,20 @@ def main(grid: Grid, context: Context) -> None:
     timing_summary_path = os.path.join(exp_dir, "timing_summary.csv")
     timing_df.to_csv(timing_summary_path, index=False)
     logging.info(f"Saved timing summary to: {timing_summary_path}")
+
+    if run_logger:
+        if best["arrays"] is None:
+            raise RuntimeError("No round produced validation metrics; no model to save")
+        run_logger.result(
+            best_round=best["round"],
+            best_eval=best.get("eval", {}),
+            total_s=total_training_time,
+            rounds_done=rounds_done,
+            uplink_bytes=strategy.round_uplink_bytes,
+            backbone_bytes=int(sum(p.numel() * p.element_size() for p in global_model.parameters())),
+            stopped_early=stopped_early,
+        )
+        return
 
     # Update master experiment log — one row per experiment
     try:

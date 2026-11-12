@@ -12,10 +12,10 @@ version = "1.0.0"
 description = ""
 license = "Apache-2.0"
 dependencies = [
-    "flwr[simulation]>=1.11.0",
-    "flwr-datasets[vision]>=0.5.0",
-    "torch==2.7.1",
-    "torchvision==0.22.1",
+    "flwr[simulation]==1.25.0",
+    "torch==2.8.0",
+    "transformers==4.56.1",
+    "peft==0.17.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -94,10 +94,26 @@ lora-r = 8
 lora-alpha = 16
 lora-dropout = 0.0
 peft-method = "lora"
-is-pretrained = false
+# Must be true: clients only receive adapters + projections, which are trained on
+# top of the pretrained backbone (bug 1 in FALL_2026_PLAN.md).
+is-pretrained = true
 
 # Regularization Parameters
 dropout = 0.15
+
+# Web platform runs (deployment mode, set by the API). Empty run-id/runs-dir keep
+# the legacy research outputs only (FLOWER_EXP_DIR).
+run-id = ""
+runs-dir = ""
+site-names = ""            # sites selected for this run, comma-separated
+partition-sites = ""       # all sites in partition-id order, comma-separated
+data-source = "builtin"    # builtin -> <data-root>/nasa_<site>.csv | upload -> <data-root>/uploads/<run-id>.csv
+data-percent = 100         # % of each client's train split to use (smoke tests)
+save-predictions = true    # per-round prediction CSVs on clients
+min-train-clients = 2      # FR-13: rounds proceed with at least this many replies
+round-timeout = 3600.0     # seconds per round before missing clients count as dropped
+checkpoint-every = 5
+resume-from = ""           # checkpoint path, absolute or relative to runs-dir (FR-14)
 
 
 ################################################################################
@@ -199,6 +215,18 @@ options.backend.client-resources.num-cpus = 2
 options.backend.client-resources.num-gpus = 1.0
 options.backend.actor = { framework = "torch", device = "cuda" }
 
+
+################################################################################
+# DEPLOYMENT: always-on SuperLink + one SuperNode per site (deploy/docker-compose.yml)
+################################################################################
+
+[tool.flwr.federations.lab]
+address = "superlink:9093"
+insecure = true
+
+[tool.flwr.federations.local-deployment]
+address = "127.0.0.1:9093"
+insecure = true
 
 ################################################################################
 # REMOTE FEDERATION (optional)

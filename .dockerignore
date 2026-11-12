@@ -1,0 +1,12 @@
+# Build context for deploy/flower/Dockerfile (repo root)
+**/.venv
+**/__pycache__
+**/*.pyc
+**/node_modules
+.git
+deploy/data
+Long-term_Forecasting/datasets
+Long-term_Forecasting/flower_app/experiments*
+federated-website
+**/*.png
+**/*.csv

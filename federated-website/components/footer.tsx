@@ -27,7 +27,10 @@ export function Footer() {
                 { href: "/instructions", label: "Instructions" },
                 { href: "/architecture", label: "System Architecture" },
                 { href: "/data-source", label: "Data Source" },
-                { href: "/dashboard", label: "Dashboard Demo" },
+                { href: "/forecast", label: "Forecast" },
+                { href: "/training", label: "Training Dashboard" },
+                { href: "/experiments", label: "Experiments" },
+                { href: "/solar", label: "Solar Forecasting" },
                 { href: "/about", label: "About Project" },
               ].map((link) => (
                 <li key={link.href}>

@@ -1,0 +1,209 @@
+# FedWind: web app + always-on federation (plan §4).
+#
+#   cp deploy/.env.example deploy/.env      # set POSTGRES_PASSWORD (and TORCH_INDEX_URL on a CPU machine)
+#   docker compose -f deploy/docker-compose.yml up --build -d                       # CPU / laptop
+#   docker compose -f deploy/docker-compose.yml -f deploy/compose.gpu.yml up --build -d   # GPU server
+#
+# web http://localhost:3000   api http://localhost:8001/docs
+#
+# Only web and api are published. superlink, client-<site> and inference-<site> stay on
+# the internal network. Each client and inference service mounts only its own site's
+# folder (data/sites/<site>), so no container sees another site's data.
+#
+# Before the first start: data/sites/<site>/nasa_<site>.csv (Long-term_Forecasting/scripts/download_kzmet.py)
+# and data/hf-cache with GPT-2 (deploy/scripts/prefetch_models.sh). See deploy/DEPLOY.md.
+
+name: fedwind
+
+x-flower: &flower
+  image: fedwind-flower:latest
+  pull_policy: never
+  restart: unless-stopped
+  environment: &flower-env
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    # CPU threads per container; five clients share the host's cores
+    OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
+
+x-client: &client
+  <<: *flower
+  depends_on:
+    - superlink
+
+x-inference: &inference
+  <<: *flower
+  entrypoint: ["uvicorn", "app:app", "--app-dir", "/opt/fedwind/inference", "--host", "0.0.0.0", "--port", "8000"]
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fedwind
+      POSTGRES_USER: fedwind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fedwind -d fedwind"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../federated-website/FastApi
+    environment:
+      DATABASE_URL: postgresql://fedwind:${POSTGRES_PASSWORD}@db:5432/fedwind
+      FRONTEND_URL: ${PUBLIC_WEB_URL:-http://localhost:3000}
+      FEDWIND_DATA_DIR: /data
+      FEDWIND_SITES_SEED: /seed/sites.json
+      # Federation control (flwr CLI against the SuperLink); empty = "not connected"
+      FEDERATION_ADDRESS: ${FEDERATION_ADDRESS-superlink:9093}
+      FLOWER_APP_DIR: /flower_app
+      FLWR_FEDERATION: lab
+      FLWR_HOME: /tmp/flwr-home
+      SERVER_RUNS_DIR: /data/runs
+      INFERENCE_URL_TEMPLATE: ${INFERENCE_URL_TEMPLATE-http://inference-{site}:8000}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      SUPPORT_CHAT_ID: ${SUPPORT_CHAT_ID:-}
+    volumes:
+      - ${FEDWIND_DATA:-./data}:/data
+      - ./seed:/seed:ro
+      - ../Long-term_Forecasting/flower_app:/flower_app:ro
+    ports:
+      - "${API_PORT:-8001}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../federated-website
+      args:
+        # Baked into the browser bundle: the address the *browser* uses to reach the API.
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8001}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # --- Federation -----------------------------------------------------------------
+
+  superlink:
+    <<: *flower
+    build:
+      context: ..
+      dockerfile: deploy/flower/Dockerfile
+      args:
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
+    command:
+      - flower-superlink
+      - --insecure
+      - --serverappio-api-address=0.0.0.0:9091
+      - --fleet-api-address=0.0.0.0:9092
+      - --control-api-address=0.0.0.0:9093
+    volumes:
+      - ${FEDWIND_DATA:-./data}/runs:/data/runs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-almaty:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=0 num-partitions=5 site=\"almaty\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/almaty:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/almaty:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-zhezkazgan:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=1 num-partitions=5 site=\"zhezkazgan\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/zhezkazgan:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/zhezkazgan:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-aktau:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=2 num-partitions=5 site=\"aktau\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/aktau:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/aktau:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-taraz:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=3 num-partitions=5 site=\"taraz\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/taraz:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/taraz:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-aktobe:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=4 num-partitions=5 site=\"aktobe\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/aktobe:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/aktobe:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  # --- Per-site inference (CPU) ------------------------------------------------------
+
+  inference-almaty:
+    <<: *inference
+    environment: { <<: *flower-env, SITE_ID: almaty, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/almaty:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-zhezkazgan:
+    <<: *inference
+    environment: { <<: *flower-env, SITE_ID: zhezkazgan, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/zhezkazgan:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-aktau:
+    <<: *inference
+    environment: { <<: *flower-env, SITE_ID: aktau, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/aktau:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-taraz:
+    <<: *inference
+    environment: { <<: *flower-env, SITE_ID: taraz, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/taraz:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-aktobe:
+    <<: *inference
+    environment: { <<: *flower-env, SITE_ID: aktobe, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/aktobe:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+volumes:
+  db-data:

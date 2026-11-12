@@ -190,7 +190,7 @@ export default function HomePage() {
             Ready to Explore the System?
           </h2>
           <p className="mt-4 text-primary-foreground/80 max-w-2xl mx-auto">
-            Learn how to participate in federated wind forecasting or try our interactive dashboard demo.
+            Learn how to participate in federated wind forecasting, or open a wind forecast for one of the sites.
           </p>
           <div className="mt-8 flex flex-col items-center justify-center gap-4 sm:flex-row">
             <Button asChild size="lg" variant="secondary" className="gap-2">
@@ -200,8 +200,8 @@ export default function HomePage() {
               </Link>
             </Button>
             <Button asChild size="lg" variant="outline" className="gap-2 border-primary-foreground/20 text-primary-foreground hover:bg-primary-foreground/10 bg-transparent">
-              <Link href="/dashboard">
-                Try Dashboard Demo
+              <Link href="/forecast">
+                Open Forecast
               </Link>
             </Button>
           </div>

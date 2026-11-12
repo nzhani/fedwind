@@ -87,7 +87,9 @@ def get_dataset_config(dataset_name: str) -> dict:
         )
     return DATASET_REGISTRY[name]
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+# Long-term_Forecasting/ (models/, datasets/). FEDWIND_ML_ROOT overrides it when Flower runs
+# the app from an installed FAB outside the repo (deployment mode).
+project_root = os.environ.get("FEDWIND_ML_ROOT") or os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 # Repo root is two levels above project_root (Long-term_Forecasting -> federated_learning -> repo)
 repo_root = os.path.abspath(os.path.join(project_root, "..", ".."))
 baselines_root = os.path.join(repo_root, "BASELINES")
@@ -596,44 +598,62 @@ def test(net, testloader, device, return_predictions=False):
     return avg_loss, mae, rmse
 
 
+def _client_dataset(
+    flag: str,
+    partition_id: int,
+    cfg: SimpleNamespace,
+    dataset_name: str,
+    data_file: str = None,
+    percent: int = 100,
+):
+    """
+    One client's split of its own data (70% train / 10% val / 20% test by time).
+
+    data_file: deployment mode, the only CSV this client may read (see
+    experiment.client_data_file). None: simulation mode, the registry file for
+    partition_id. The scaler is always fit on this client's own train split.
+    """
+    if cfg is None:
+        raise ValueError("cfg must be provided. Use get_default_configs(pred_len=...) to create cfg.")
+
+    ds_cfg = get_dataset_config(dataset_name)
+    if data_file:
+        root_path, data_path = os.path.split(data_file)
+        # Uploaded files may lack "nasa" in their name; force the NASA POWER parser.
+        name = f"nasa_{os.path.splitext(data_path)[0]}"
+    else:
+        root_path = os.path.join(project_root, ds_cfg["folder"])
+        data_path = ds_cfg["files"][partition_id]
+        name = "none"
+    label_len = getattr(cfg, "label_len", 48)
+
+    dataset = Dataset_Custom(
+        root_path=root_path,
+        flag=flag,
+        size=(cfg.seq_len, label_len, cfg.pred_len),
+        data_path=data_path,
+        target=ds_cfg["target"],
+        scale=True,
+        percent=percent,
+        dataset_name=name,
+    )
+    logging.info(f"Client {partition_id}: {flag} split of {data_path}: {len(dataset.data_x)} rows, {len(dataset)} samples")
+    return dataset
+
+
 def load_client_train(
     partition_id: int,
     num_partitions: int,
     bs: int = 32,
     cfg: SimpleNamespace = None,
     dataset_name: str = "VNMET",
+    data_file: str = None,
+    percent: int = 100,
 ):
-    """
-    Each client loads a different partition of the *training* data (70% of full dataset).
-    cfg must be provided with pred_len specified.
-    Uses dataset configuration from DATASET_REGISTRY.
-    """
-    if cfg is None:
-        raise ValueError("cfg must be provided to load_client_train(). Use get_default_configs(pred_len=1X) to create cfg.")
-
-    ds_cfg = get_dataset_config(dataset_name)
-    root_path = os.path.join(project_root, ds_cfg["folder"])
-    client_datasets = ds_cfg["files"]
-    data_path = client_datasets[partition_id]
-    label_len = getattr(cfg, "label_len", 48)
-    seq_len, pred_len = cfg.seq_len, cfg.pred_len
-    target = ds_cfg["target"]
-
-    full_train = Dataset_Custom(
-        root_path=root_path,
-        flag='train',
-        size=(seq_len, label_len, pred_len),
-        data_path=data_path,
-        target=target,
-        scale=True,
-        percent=100
-    )
-
-    logging.info(f"Client {partition_id}: Loaded {len(full_train.data_x)} raw CSV rows for training.")
-    logging.info(f"Client {partition_id}: Total dataset size before partitioning: {len(full_train)}")
+    """Client training loader. percent < 100 keeps only the first part of the train split (smoke tests)."""
+    full_train = _client_dataset("train", partition_id, cfg, dataset_name, data_file, percent)
     logging.info(f"Client {partition_id}: Partition ID: {partition_id}, Num partitions: {num_partitions}")
-    trainloader = DataLoader(full_train, batch_size=bs, shuffle=True, drop_last=False)
-    return trainloader
+    return DataLoader(full_train, batch_size=bs, shuffle=True, drop_last=False)
 
 
 def load_client_val(
@@ -641,35 +661,11 @@ def load_client_val(
     bs: int = 32,
     cfg: SimpleNamespace = None,
     dataset_name: str = "VNMET",
+    data_file: str = None,
 ):
-    """
-    Each client loads their local validation data (20% of their local dataset).
-    cfg must be provided with pred_len specified.
-    Uses dataset configuration from DATASET_REGISTRY.
-    """
-    if cfg is None:
-        raise ValueError("cfg must be provided to load_client_val(). Use get_default_configs(pred_len=1X) to create cfg.")
-
-    ds_cfg = get_dataset_config(dataset_name)
-    root_path = os.path.join(project_root, ds_cfg["folder"])
-    client_datasets = ds_cfg["files"]
-    data_path = client_datasets[partition_id]
-    label_len = getattr(cfg, "label_len", 48)
-    seq_len, pred_len = cfg.seq_len, cfg.pred_len
-    target = ds_cfg["target"]
-
-    val_dataset = Dataset_Custom(
-        root_path=root_path,
-        flag='val',
-        size=(seq_len, label_len, pred_len),
-        data_path=data_path,
-        target=target,
-        scale=True
-    )
-
-    logging.info(f"Client {partition_id}: Loaded {len(val_dataset.data_x)} raw CSV rows for validation.")
-    valloader = DataLoader(val_dataset, batch_size=bs, shuffle=False, drop_last=False)
-    return valloader
+    """Client validation loader (10% of the client's data, after train)."""
+    val_dataset = _client_dataset("val", partition_id, cfg, dataset_name, data_file)
+    return DataLoader(val_dataset, batch_size=bs, shuffle=False, drop_last=False)
 
 
 def load_client_test(
@@ -677,35 +673,30 @@ def load_client_test(
     bs: int = 32,
     cfg: SimpleNamespace = None,
     dataset_name: str = "VNMET",
+    data_file: str = None,
 ):
+    """Client test loader (last 20% of the client's data)."""
+    test_dataset = _client_dataset("test", partition_id, cfg, dataset_name, data_file)
+    return DataLoader(test_dataset, batch_size=bs, shuffle=False, drop_last=False)
+
+
+def persistence_errors(loader, pred_len: int):
     """
-    Each client loads their local test data (10% of their local dataset).
-    cfg must be provided with pred_len specified.
-    Uses dataset configuration from DATASET_REGISTRY.
+    MAE and RMSE of the persistence baseline (last observed value repeated over the
+    horizon) on the same windows, in the loader's normalized units (DR-07).
     """
-    if cfg is None:
-        raise ValueError("cfg must be provided to load_client_test(). Use get_default_configs(pred_len=1X) to create cfg.")
-
-    ds_cfg = get_dataset_config(dataset_name)
-    root_path = os.path.join(project_root, ds_cfg["folder"])
-    client_datasets = ds_cfg["files"]
-    data_path = client_datasets[partition_id]
-    label_len = getattr(cfg, "label_len", 48)
-    seq_len, pred_len = cfg.seq_len, cfg.pred_len
-    target = ds_cfg["target"]
-
-    test_dataset = Dataset_Custom(
-        root_path=root_path,
-        flag='test',
-        size=(seq_len, label_len, pred_len),
-        data_path=data_path,
-        target=target,
-        scale=True
-    )
-
-    logging.info(f"Client {partition_id}: Loaded {len(test_dataset.data_x)} raw CSV rows for testing.")
-    testloader = DataLoader(test_dataset, batch_size=bs, shuffle=False, drop_last=False)
-    return testloader
+    abs_sum, sq_sum, n = 0.0, 0.0, 0
+    for batch in loader:
+        x, y = (batch["x"], batch["y"]) if isinstance(batch, dict) else (batch[0], batch[1])
+        x = torch.as_tensor(x).float()
+        y = torch.as_tensor(y).float()[:, -pred_len:, :]
+        diff = x[:, -1:, :].expand_as(y) - y
+        abs_sum += diff.abs().sum().item()
+        sq_sum += (diff ** 2).sum().item()
+        n += diff.numel()
+    if n == 0:
+        return float("nan"), float("nan")
+    return abs_sum / n, (sq_sum / n) ** 0.5
 
 
 def _load_centralized(

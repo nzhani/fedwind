@@ -9,62 +9,40 @@ import numpy as np
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from my_flower_app.task import get_default_configs, Net, load_client_train, load_client_val, load_client_test, train as train_fn, test as test_fn, trainable_state_dict
+from my_flower_app.task import Net, load_client_train, load_client_val, load_client_test, persistence_errors, train as train_fn, test as test_fn, trainable_state_dict
+from my_flower_app.experiment import build_model_configs, client_data_file, is_selected, seed_everything
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = ClientApp()
 
+
+def _skip_reply(msg: Message, pid: int, keep_arrays: bool) -> Message:
+    """
+    Reply of a client whose site isn't selected for this run: weight 0, so it
+    changes nothing in the weighted average; `skipped` lets the server leave it out.
+    """
+    content = {"metrics": MetricRecord({"num-examples": 0, "partition-id": pid, "skipped": 1})}
+    if keep_arrays:
+        content["arrays"] = msg.content["arrays"]
+    return Message(content=RecordDict(content), reply_to=msg)
+
+
 @app.train()
 def train(msg: Message, context: Context):
-    # Get model parameters from train config (passed from server)
     conf = msg.content["config"]
-    configs = get_default_configs(
-        pred_len=conf.get("pred_len", 120),
-        model=conf.get("model", "gpt4ts_nonlinear"),
-        seq_len=conf.get("seq_len", 336),
-        patch_size=conf.get("patch_size", 4),
-        stride=conf.get("stride", 1),
-        d_model=conf.get("d_model", 768),
-        hidden_size=conf.get("hidden_size", 16),
-        kernel_size=conf.get("kernel_size", 3),
-        llm_layers=conf.get("llm_layers", 4),
-        peft_method=conf.get("peft_method", "lora"),
-        lora_r=conf.get("lora_r", 8),
-        lora_alpha=conf.get("lora_alpha", 16),
-        lora_dropout=conf.get("lora_dropout", 0.15),
-        dropout=conf.get("dropout", 0.15),
-        adalora_total_step=conf.get("adalora_total_step", None),
-        label_len=conf.get("label_len", 48),
-        enc_in=conf.get("enc_in", 1),
-        dec_in=conf.get("dec_in", 1),
-        c_out=conf.get("c_out", 1),
-        embed_type=conf.get("embed_type", 0),
-        embed=conf.get("embed", "timeF"),
-        freq=conf.get("freq", "h"),
-        factor=conf.get("factor", 1),
-        n_heads=conf.get("n_heads", 4),
-        e_layers=conf.get("e_layers", 2),
-        d_layers=conf.get("d_layers", 1),
-        d_ff=conf.get("d_ff", 512),
-        distil=conf.get("distil", True),
-        activation=conf.get("activation", "gelu"),
-        output_attention=conf.get("output_attention", False),
-        fc_dropout=conf.get("fc_dropout", 0.05),
-        head_dropout=conf.get("head_dropout", 0.0),
-        patch_len=conf.get("patch_len", 16),
-        padding_patch=conf.get("padding_patch", "end"),
-        revin=conf.get("revin", 1),
-        affine=conf.get("affine", 0),
-        subtract_last=conf.get("subtract_last", 0),
-        decomposition=conf.get("decomposition", 0),
-        individual=conf.get("individual", 0),
-        # Must use pretrained=True so the frozen backbone has real weights.
-        # The server only transmits trainable params (adapters + projections);
-        # loading with strict=False overlays them onto the pretrained backbone.
-        is_pretrained=conf.get("is_pretrained", True),
-    )
+    pid = context.node_config["partition-id"]
+    if not is_selected(context.node_config, context.run_config):
+        logging.info(f"[CLIENT {pid}] Site not selected for this run; skipping training")
+        return _skip_reply(msg, pid, keep_arrays=True)
+
+    seed_everything(int(context.run_config.get("random-seed", 2021)) + int(pid))
+    # Same function as the server and evaluate(), so the backbone always matches (pretrained or not).
+    # The server only transmits trainable params (adapters + projections);
+    # loading with strict=False overlays them onto the backbone.
+    configs = build_model_configs(context.run_config)
+    configs.adalora_total_step = conf.get("adalora_total_step", configs.adalora_total_step)
 
     model = Net(configs=configs)
     state = msg.content["arrays"].to_torch_state_dict()
@@ -76,18 +54,18 @@ def train(msg: Message, context: Context):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    pid = context.node_config["partition-id"]
     npt = context.node_config["num-partitions"]
     bs  = context.run_config.get("batch-size", 32)
     dataset_name = context.run_config.get("dataset-name", "VNMET")
-    trainloader = load_client_train(pid, npt, bs=bs, cfg=configs, dataset_name=dataset_name)
+    data_file = client_data_file(context.node_config, context.run_config)
+    percent = int(context.run_config.get("data-percent", 100))
+    trainloader = load_client_train(pid, npt, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file, percent=percent)
     
     # Get experiment directory from environment variable
     exp_dir = os.environ.get("FLOWER_EXP_DIR", ".")
     
     # Load validation set for tracking local overfitting
-    valloader = load_client_val(pid, bs=bs, cfg=configs, dataset_name=dataset_name)
-
+    valloader = load_client_val(pid, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file)
     logging.info(f"[CLIENT {pid}] Training on {len(trainloader.dataset)} samples, BatchSize={bs}")
 
     # --- Learning Rate Schedule: Warmup + Decay ---
@@ -154,6 +132,7 @@ def train(msg: Message, context: Context):
         "train_loss": float(train_loss),
         "train_duration_sec": float(train_duration),
         "num-examples": len(trainloader.dataset),
+        "partition-id": pid,
     })
     
     content_dict = {"arrays": arrays, "metrics": metrics}
@@ -170,51 +149,14 @@ def evaluate(msg: Message, context: Context):
     """
     Perform local validation and test evaluation on client's datasets.
     This is called by the server to get federated evaluation metrics.
-    Evaluates on both val (20%) and test (10%) splits.
+    Evaluates on both the val and test splits; reports normalized and real-unit
+    (m/s) errors plus the persistence baseline on the test windows.
     """
-    # Get model parameters from run_config (for evaluation)
-    conf = context.run_config
-    configs = get_default_configs(
-        pred_len=conf.get("pred-len", 120),
-        model=conf.get("model", "gpt4ts_nonlinear"),
-        seq_len=conf.get("seq-len", 336),
-        patch_size=conf.get("patch-size", 4),
-        stride=conf.get("stride", 1),
-        d_model=conf.get("d-model", 768),
-        hidden_size=conf.get("hidden-size", 16),
-        kernel_size=conf.get("kernel-size", 3),
-        llm_layers=conf.get("llm-layers", 4),
-        peft_method=conf.get("peft-method", "lora"),
-        lora_r=conf.get("lora-r", 8),
-        lora_alpha=conf.get("lora-alpha", 16),
-        lora_dropout=conf.get("lora-dropout", 0.15),
-        dropout=conf.get("dropout", 0.15),
-        label_len=conf.get("label-len", 48),
-        enc_in=conf.get("enc-in", 1),
-        dec_in=conf.get("dec-in", 1),
-        c_out=conf.get("c-out", 1),
-        embed_type=conf.get("embed-type", 0),
-        embed=conf.get("embed", "timeF"),
-        freq=conf.get("freq", "h"),
-        factor=conf.get("factor", 1),
-        n_heads=conf.get("n-heads", 4),
-        e_layers=conf.get("e-layers", 2),
-        d_layers=conf.get("d-layers", 1),
-        d_ff=conf.get("d-ff", 512),
-        distil=conf.get("distil", True),
-        activation=conf.get("activation", "gelu"),
-        output_attention=conf.get("output-attention", False),
-        fc_dropout=conf.get("fc-dropout", 0.05),
-        head_dropout=conf.get("head-dropout", 0.0),
-        patch_len=conf.get("patch-len", 16),
-        padding_patch=conf.get("padding-patch", "end"),
-        revin=conf.get("revin", 1),
-        affine=conf.get("affine", 0),
-        subtract_last=conf.get("subtract-last", 0),
-        decomposition=conf.get("decomposition", 0),
-        individual=conf.get("individual", 0),
-        is_pretrained=conf.get("is-pretrained", True),
-    )
+    pid = context.node_config["partition-id"]
+    if not is_selected(context.node_config, context.run_config):
+        return _skip_reply(msg, pid, keep_arrays=False)
+
+    configs = build_model_configs(context.run_config)
 
     model = Net(configs=configs)
     state = msg.content["arrays"].to_torch_state_dict()
@@ -226,17 +168,11 @@ def evaluate(msg: Message, context: Context):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    pid = context.node_config["partition-id"]
     bs = context.run_config.get("batch-size", 32)
     dataset_name = context.run_config.get("dataset-name", "VNMET")
+    data_file = client_data_file(context.node_config, context.run_config)
+    save_predictions = bool(context.run_config.get("save-predictions", True))
     config_record = msg.content.get("config", None)
-    logging.info(
-        "[CLIENT %s] Eval config type=%s, value=%s, has_data=%s",
-        pid,
-        type(config_record),
-        config_record,
-        hasattr(config_record, "data"),
-    )
     if config_record is not None:
         if hasattr(config_record, "data"):
             current_round = config_record.data.get("server_round", 1)
@@ -249,8 +185,8 @@ def evaluate(msg: Message, context: Context):
     # Get experiment directory from environment variable
     exp_dir = os.environ.get("FLOWER_EXP_DIR", ".")
 
-    # Validation evaluation (20% of data)
-    valloader = load_client_val(pid, bs=bs, cfg=configs, dataset_name=dataset_name)
+    # Validation evaluation
+    valloader = load_client_val(pid, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file)
     logging.info(f"[CLIENT {pid}] Evaluating on {len(valloader.dataset)} validation samples")
 
     val_start_time = time.time()
@@ -259,11 +195,11 @@ def evaluate(msg: Message, context: Context):
 
     logging.info(f"[CLIENT {pid}] Validation complete. ValLoss={val_loss:.6f}, MAE={val_mae:.6f}, RMSE={val_rmse:.6f}, Duration={val_duration:.2f}s")
 
-    # Save validation predictions to CSV
-    _save_predictions_to_csv(val_preds, val_trues, exp_dir, pid, current_round, "val", configs.pred_len)
+    if save_predictions:
+        _save_predictions_to_csv(val_preds, val_trues, exp_dir, pid, current_round, "val", configs.pred_len)
 
-    # Test evaluation (10% of data)
-    testloader = load_client_test(pid, bs=bs, cfg=configs, dataset_name=dataset_name)
+    # Test evaluation
+    testloader = load_client_test(pid, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file)
     logging.info(f"[CLIENT {pid}] Evaluating on {len(testloader.dataset)} test samples")
 
     test_start_time = time.time()
@@ -272,8 +208,15 @@ def evaluate(msg: Message, context: Context):
 
     logging.info(f"[CLIENT {pid}] Test complete. TestLoss={test_loss:.6f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}, Duration={test_duration:.2f}s")
 
-    # Save test predictions to CSV
-    _save_predictions_to_csv(test_preds, test_trues, exp_dir, pid, current_round, "test", configs.pred_len)
+    if save_predictions:
+        _save_predictions_to_csv(test_preds, test_trues, exp_dir, pid, current_round, "test", configs.pred_len)
+
+    # Real units (plan T2.3): the target is scaled alone (features='S'), so errors scale
+    # by the standard deviation of this site's train split, and values invert linearly.
+    scaler = testloader.dataset.scaler
+    std, mean = float(scaler.scale_[-1]), float(scaler.mean_[-1])
+    persist_mae, persist_rmse = persistence_errors(testloader, configs.pred_len)
+    test_mean_real = float(np.mean(test_trues) * std + mean) if test_trues.size else float("nan")
 
     # Save scalar metrics
     eval_metrics = {
@@ -293,6 +236,7 @@ def evaluate(msg: Message, context: Context):
     num_examples = len(valloader.dataset) + len(testloader.dataset)
     metrics = MetricRecord({
         "num-examples": num_examples,
+        "partition-id": pid,
         "val_loss": float(val_loss),
         "val_mae": float(val_mae),
         "val_rmse": float(val_rmse),
@@ -301,6 +245,15 @@ def evaluate(msg: Message, context: Context):
         "test_mae": float(test_mae),
         "test_rmse": float(test_rmse),
         "test_duration_sec": float(test_duration),
+        "val_mae_real": float(val_mae * std),
+        "val_rmse_real": float(val_rmse * std),
+        "test_mae_real": float(test_mae * std),
+        "test_rmse_real": float(test_rmse * std),
+        "test_mean_real": test_mean_real,
+        "persistence_mae_real": float(persist_mae * std),
+        "persistence_rmse_real": float(persist_rmse * std),
+        "num-val-examples": len(valloader.dataset),
+        "num-test-examples": len(testloader.dataset),
     })
     content = RecordDict({"metrics": metrics})
     return Message(content=content, reply_to=msg)
