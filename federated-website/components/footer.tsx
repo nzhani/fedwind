@@ -1,67 +1,70 @@
-import { Wind } from "lucide-react"
+"use client"
+
+// Footer with big links (DESIGN_SPEC.md §4.7). Hidden on the split login / register screens.
+
 import Link from "next/link"
+import { usePathname } from "next/navigation"
+import { Roll } from "@/components/fw/button"
+import { Wordmark } from "@/components/fw/mark"
+
+const COLUMNS = [
+  {
+    label: "Explore",
+    links: [
+      { href: "/forecast", label: "Forecast" },
+      { href: "/training", label: "Training" },
+      { href: "/experiments", label: "Experiments" },
+      { href: "/register", label: "Register a plant" },
+    ],
+  },
+  {
+    label: "Learn",
+    links: [
+      { href: "/about", label: "About" },
+      { href: "/architecture", label: "Architecture" },
+      { href: "/solar", label: "Solar" },
+      { href: "/data-source", label: "Data source" },
+      { href: "/instructions", label: "Instructions" },
+    ],
+  },
+]
 
 export function Footer() {
+  const pathname = usePathname()
+  if (pathname === "/login" || pathname === "/register") return null
   return (
-    <footer className="border-t border-border bg-card">
-      <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-        <div className="grid gap-8 md:grid-cols-3">
-          {/* Brand Section */}
-          <div className="space-y-4">
-            <Link href="/" className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-                <Wind className="h-4 w-4 text-primary-foreground" />
-              </div>
-              <span className="text-lg font-semibold text-foreground">FedWind</span>
-            </Link>
-            {/* <p className="text-sm text-muted-foreground leading-relaxed">
-              Privacy-preserving wind speed and power forecasting using Federated Learning and Large Language Models.
-            </p> */}
-          </div>
-
-          {/* Quick Links */}
+    <footer className="bg-white px-5 pb-12 pt-12 sm:px-12">
+      <div className="border-t border-line pt-12">
+        <div className="grid gap-12 md:grid-cols-[1fr_1fr_1fr] md:gap-16">
+          {COLUMNS.map((col) => (
+            <div key={col.label}>
+              <div className="mb-5 text-[10px] font-medium uppercase tracking-[0.1em] text-fw-muted">{col.label}</div>
+              <ul className="space-y-1.5">
+                {col.links.map((l) => (
+                  <li key={l.href}>
+                    <Link href={l.href} className="group inline-flex rounded-sm text-[23px] font-medium leading-[1.15] tracking-[-0.01em] text-ink md:text-[32px]">
+                      <Roll>{l.label}</Roll>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
           <div>
-            <h3 className="mb-4 text-sm font-semibold text-foreground">Quick Links</h3>
-            <ul className="space-y-2">
-              {[
-                { href: "/instructions", label: "Instructions" },
-                { href: "/architecture", label: "System Architecture" },
-                { href: "/data-source", label: "Data Source" },
-                { href: "/forecast", label: "Forecast" },
-                { href: "/training", label: "Training Dashboard" },
-                { href: "/experiments", label: "Experiments" },
-                { href: "/solar", label: "Solar Forecasting" },
-                { href: "/about", label: "About Project" },
-              ].map((link) => (
-                <li key={link.href}>
-                  <Link
-                    href={link.href}
-                    className="text-sm text-muted-foreground transition-colors hover:text-primary"
-                  >
-                    {link.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* Research Info */}
-          <div>
-            <h3 className="mb-4 text-sm font-semibold text-foreground">Research Project</h3>
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              This is a university research project focused on developing privacy-preserving machine learning solutions for renewable energy forecasting.
+            <div className="mb-5 text-[10px] font-medium uppercase tracking-[0.1em] text-fw-muted">Project</div>
+            <p className="text-base font-medium leading-6 text-ink">
+              Federated learning with a frozen GPT-2 for wind and solar power forecasting.
             </p>
-            <p className="mt-3 text-sm text-muted-foreground">
-              Built with Federated Learning, Transformer-based LLMs, and PyTorch.
+            <p className="mt-4 text-base leading-6 text-fw-muted">
+              Nazarbayev University
+              <br />
+              Astana, Kazakhstan
             </p>
           </div>
         </div>
-
-        {/* Bottom Bar */}
-        <div className="mt-8 border-t border-border pt-8">
-          <p className="text-center text-sm text-muted-foreground">
-            {new Date().getFullYear()} FedWind Research Project. For academic and research purposes.
-          </p>
+        <div className="mt-16 flex flex-col gap-3 text-sm text-fw-muted sm:flex-row sm:items-center sm:justify-between">
+          <Wordmark className="text-ink" />
+          <span>© 2026 ArqauQuat · research prototype · data never leaves the plant</span>
         </div>
       </div>
     </footer>

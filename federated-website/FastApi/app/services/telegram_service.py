@@ -47,6 +47,10 @@ def send_telegram_message(text: str) -> Dict[str, Any]:
 
 def set_telegram_webhook(webhook_url: str) -> Dict[str, Any]:
     payload = {"url": webhook_url}
+    # Telegram then sends this value in X-Telegram-Bot-Api-Secret-Token with every update
+    secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if secret:
+        payload["secret_token"] = secret
 
     response = requests.post(_api_url("setWebhook"), json=payload, timeout=15)
     response.raise_for_status()

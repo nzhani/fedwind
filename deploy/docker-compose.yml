@@ -9,8 +9,11 @@
 # Only web and api are published. superlink, client-<site> and inference-<site> stay on
 # the internal network. Each client and inference service mounts only its own site's
 # folder (data/sites/<site>), so no container sees another site's data.
+# Five wind sites (partition ids 0-4) and five solar sites (5-9) share one SuperLink;
+# each run names its sites, and the others reply "skipped".
 #
-# Before the first start: data/sites/<site>/nasa_<site>.csv (Long-term_Forecasting/scripts/download_kzmet.py)
+# Before the first start: data/sites/<site>/nasa_<site>.csv (Long-term_Forecasting/scripts/download_kzmet.py,
+# once with --energy wind and once with --energy solar)
 # and data/hf-cache with GPT-2 (deploy/scripts/prefetch_models.sh). See deploy/DEPLOY.md.
 
 name: fedwind
@@ -64,12 +67,33 @@ services:
       FLWR_HOME: /tmp/flwr-home
       SERVER_RUNS_DIR: /data/runs
       INFERENCE_URL_TEMPLATE: ${INFERENCE_URL_TEMPLATE-http://inference-{site}:8000}
+      # Central forecasting for plants (forecast-window); reads no site data
+      INFERENCE_CENTRAL_URL: ${INFERENCE_CENTRAL_URL-http://inference-central:8000}
+      # Accounts (SITE_NETWORK_PLAN.md §3). Plain-http laptop setups need SESSION_COOKIE_SECURE=false.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      # Site connection (DEMO_SIMULATION_PLAN.md): token = per-site key (development/demo only)
+      SITE_AUTH_MODE: ${SITE_AUTH_MODE:-token}
+      HEARTBEAT_S: ${HEARTBEAT_S:-30}
+      SITE_API_PUBLIC_URL: ${PUBLIC_API_URL:-http://localhost:8001}
+      # Visitors come through the web server's /api forwarding (and maybe a Cloudflare tunnel):
+      # take their address from CF-Connecting-IP / X-Forwarded-For for login throttling and the audit log
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
       BOT_TOKEN: ${BOT_TOKEN:-}
       SUPPORT_CHAT_ID: ${SUPPORT_CHAT_ID:-}
+      # Site PKI (SITE_NETWORK_PLAN.md M3): the CA lives in its own volume that only the API mounts
+      # (back up ca.key offline). FLOWER_NODE_AUTH=on registers each plant's SuperNode key at
+      # enrollment; leave it off until the SuperLink runs with TLS + --enable-supernode-auth (M4).
+      # GATEWAY_SHARED_SECRET: the mTLS gateway's proof for X-Site-Id / X-Client-Serial (mtls mode).
+      SITE_CA_DIR: /secrets/site-ca
+      FLOWER_NODE_AUTH: ${FLOWER_NODE_AUTH:-off}
+      GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET:-}
     volumes:
       - ${FEDWIND_DATA:-./data}:/data
       - ./seed:/seed:ro
       - ../Long-term_Forecasting/flower_app:/flower_app:ro
+      - site-ca:/secrets/site-ca
     ports:
       - "${API_PORT:-8001}:8000"
     depends_on:
@@ -86,13 +110,26 @@ services:
     build:
       context: ../federated-website
       args:
-        # Baked into the browser bundle: the address the *browser* uses to reach the API.
-        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8001}
+        # Empty: the browser calls /api on the website itself and the web server forwards it to
+        # the API (next.config.mjs), so localhost and a public tunnel both work with one build.
+        NEXT_PUBLIC_API_URL: ${WEB_API_URL:-}
+        API_INTERNAL_URL: http://api:8000
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:
       - api
     restart: unless-stopped
+
+  # Public link to the website (deploy/tunnel.sh on|off). A Cloudflare quick tunnel: no account,
+  # a random https://….trycloudflare.com address, gone when stopped. Off unless asked for.
+  tunnel:
+    image: cloudflare/cloudflared:2025.11.1
+    profiles: ["tunnel"]
+    # http2 over TCP 443: many university and office networks block QUIC (UDP 7844)
+    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "--url", "http://web:3000"]
+    depends_on:
+      - web
+    restart: "no"
 
   # --- Federation -----------------------------------------------------------------
 
@@ -116,7 +153,7 @@ services:
   client-almaty:
     <<: *client
     command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
-              "--node-config=partition-id=0 num-partitions=5 site=\"almaty\" data-root=\"/data/site\""]
+              "--node-config=partition-id=0 num-partitions=10 site=\"almaty\" data-root=\"/data/site\""]
     environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/almaty:/data/site:ro
@@ -126,7 +163,7 @@ services:
   client-zhezkazgan:
     <<: *client
     command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
-              "--node-config=partition-id=1 num-partitions=5 site=\"zhezkazgan\" data-root=\"/data/site\""]
+              "--node-config=partition-id=1 num-partitions=10 site=\"zhezkazgan\" data-root=\"/data/site\""]
     environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/zhezkazgan:/data/site:ro
@@ -136,7 +173,7 @@ services:
   client-aktau:
     <<: *client
     command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
-              "--node-config=partition-id=2 num-partitions=5 site=\"aktau\" data-root=\"/data/site\""]
+              "--node-config=partition-id=2 num-partitions=10 site=\"aktau\" data-root=\"/data/site\""]
     environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/aktau:/data/site:ro
@@ -146,7 +183,7 @@ services:
   client-taraz:
     <<: *client
     command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
-              "--node-config=partition-id=3 num-partitions=5 site=\"taraz\" data-root=\"/data/site\""]
+              "--node-config=partition-id=3 num-partitions=10 site=\"taraz\" data-root=\"/data/site\""]
     environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/taraz:/data/site:ro
@@ -156,18 +193,69 @@ services:
   client-aktobe:
     <<: *client
     command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
-              "--node-config=partition-id=4 num-partitions=5 site=\"aktobe\" data-root=\"/data/site\""]
+              "--node-config=partition-id=4 num-partitions=10 site=\"aktobe\" data-root=\"/data/site\""]
     environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/aktobe:/data/site:ro
       - ${FEDWIND_DATA:-./data}/outputs/aktobe:/outputs
       - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
 
+  # Solar sites (partition ids 5-9): same image and SuperLink; a run only uses the sites it names
+  client-konaev:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=5 num-partitions=10 site=\"konaev\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/konaev:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/konaev:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-shymkent:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=6 num-partitions=10 site=\"shymkent\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/shymkent:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/shymkent:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-kyzylorda:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=7 num-partitions=10 site=\"kyzylorda\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/kyzylorda:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/kyzylorda:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-saran:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=8 num-partitions=10 site=\"saran\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/saran:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/saran:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  client-turkistan:
+    <<: *client
+    command: [flower-supernode, --insecure, --superlink=superlink:9092, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=9 num-partitions=10 site=\"turkistan\" data-root=\"/data/site\""]
+    environment: { <<: *flower-env, FLOWER_EXP_DIR: /outputs }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/turkistan:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/outputs/turkistan:/outputs
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
   # --- Per-site inference (CPU) ------------------------------------------------------
 
   inference-almaty:
     <<: *inference
-    environment: { <<: *flower-env, SITE_ID: almaty, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    environment: { <<: *flower-env, ENERGY_TYPE: wind, SITE_ID: almaty, DATA_ROOT: /data/site, MODELS_ROOT: /models }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/almaty:/data/site:ro
       - ${FEDWIND_DATA:-./data}/models:/models:ro
@@ -175,7 +263,7 @@ services:
 
   inference-zhezkazgan:
     <<: *inference
-    environment: { <<: *flower-env, SITE_ID: zhezkazgan, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    environment: { <<: *flower-env, ENERGY_TYPE: wind, SITE_ID: zhezkazgan, DATA_ROOT: /data/site, MODELS_ROOT: /models }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/zhezkazgan:/data/site:ro
       - ${FEDWIND_DATA:-./data}/models:/models:ro
@@ -183,7 +271,7 @@ services:
 
   inference-aktau:
     <<: *inference
-    environment: { <<: *flower-env, SITE_ID: aktau, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    environment: { <<: *flower-env, ENERGY_TYPE: wind, SITE_ID: aktau, DATA_ROOT: /data/site, MODELS_ROOT: /models }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/aktau:/data/site:ro
       - ${FEDWIND_DATA:-./data}/models:/models:ro
@@ -191,7 +279,7 @@ services:
 
   inference-taraz:
     <<: *inference
-    environment: { <<: *flower-env, SITE_ID: taraz, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    environment: { <<: *flower-env, ENERGY_TYPE: wind, SITE_ID: taraz, DATA_ROOT: /data/site, MODELS_ROOT: /models }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/taraz:/data/site:ro
       - ${FEDWIND_DATA:-./data}/models:/models:ro
@@ -199,11 +287,61 @@ services:
 
   inference-aktobe:
     <<: *inference
-    environment: { <<: *flower-env, SITE_ID: aktobe, DATA_ROOT: /data/site, MODELS_ROOT: /models }
+    environment: { <<: *flower-env, ENERGY_TYPE: wind, SITE_ID: aktobe, DATA_ROOT: /data/site, MODELS_ROOT: /models }
     volumes:
       - ${FEDWIND_DATA:-./data}/sites/aktobe:/data/site:ro
       - ${FEDWIND_DATA:-./data}/models:/models:ro
       - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
 
+  inference-konaev:
+    <<: *inference
+    environment: { <<: *flower-env, ENERGY_TYPE: solar, SITE_ID: konaev, DATA_ROOT: /data/site, MODELS_ROOT: /models, PV_CAPACITY_KW: "1000" }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/konaev:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-shymkent:
+    <<: *inference
+    environment: { <<: *flower-env, ENERGY_TYPE: solar, SITE_ID: shymkent, DATA_ROOT: /data/site, MODELS_ROOT: /models, PV_CAPACITY_KW: "1000" }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/shymkent:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-kyzylorda:
+    <<: *inference
+    environment: { <<: *flower-env, ENERGY_TYPE: solar, SITE_ID: kyzylorda, DATA_ROOT: /data/site, MODELS_ROOT: /models, PV_CAPACITY_KW: "1000" }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/kyzylorda:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-saran:
+    <<: *inference
+    environment: { <<: *flower-env, ENERGY_TYPE: solar, SITE_ID: saran, DATA_ROOT: /data/site, MODELS_ROOT: /models, PV_CAPACITY_KW: "1000" }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/saran:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  inference-turkistan:
+    <<: *inference
+    environment: { <<: *flower-env, ENERGY_TYPE: solar, SITE_ID: turkistan, DATA_ROOT: /data/site, MODELS_ROOT: /models, PV_CAPACITY_KW: "1000" }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/sites/turkistan:/data/site:ro
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  # Central forecasting (DEMO_SIMULATION_PLAN.md §2.3): forecasts for plants from the window they
+  # share; mounts only the promoted models, never site data
+  inference-central:
+    <<: *inference
+    environment: { <<: *flower-env, MODELS_ROOT: /models }
+    volumes:
+      - ${FEDWIND_DATA:-./data}/models:/models:ro
+      - ${FEDWIND_DATA:-./data}/hf-cache:/hf-cache:ro
+
 volumes:
   db-data:
+  site-ca:

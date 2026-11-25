@@ -62,3 +62,24 @@ def test_nan_becomes_null(tmp_path):
     lg.round(1, 1, 1.0, {0: {"num-examples": 1, "train_loss": float("nan")}}, {}, None, None)
     line = json.loads((tmp_path / "r1" / "metrics.jsonl").read_text())
     assert line["train_loss"] is None
+
+
+def test_solar_result_uses_watts_and_smart_persistence_rmse_skill(tmp_path):
+    rc = {"runs-dir": str(tmp_path), "run-id": "s1", "pred-len": 72, "energy-type": "solar"}
+    lg = RunLogger.from_run_config(rc, ["konaev", "saran"], [])
+    best_eval = {
+        0: {"test_mae": 0.2, "test_rmse": 0.3, "test_mae_real": 60.0, "test_rmse_real": 90.0, "test_mbe_real": -5.0,
+            "test_mae_all_real": 30.0, "test_rmse_all_real": 60.0, "test_mean_real": 400.0,
+            "persistence_mae_real": 80.0, "persistence_rmse_real": 120.0,
+            "plain_persistence_mae_real": 200.0, "climatology_mae_real": 70.0, "climatology_rmse_real": 100.0},
+    }
+    res = lg.result(2, best_eval, 100.0, 2, 1000, 500_000_000, False)
+    site = res["metrics"]["per_site"]["konaev"]
+    assert res["unit"] == "W/m2" and res["energy_type"] == "solar"
+    assert abs(site["skill_vs_persistence"] - (1 - 90 / 120)) < 1e-9          # RMSE vs smart persistence
+    assert abs(site["skill_vs_climatology"] - 0.1) < 1e-9
+    assert site["nmae"] == 60.0 / 400.0 and site["mbe"] == -5.0
+    assert "smart persistence" in res["metrics"]["reference"]
+    lg.round(1, 2, 5.0, {0: {"num-examples": 10, "partition-id": 0}}, {0: {"val_mae_real": 55.0}}, 1, 1)
+    line = json.loads((tmp_path / "s1" / "metrics.jsonl").read_text().splitlines()[0])
+    assert line["val_real"]["unit"] == "W/m2"

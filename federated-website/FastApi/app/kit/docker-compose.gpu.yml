@@ -1,0 +1,11 @@
+# GPU for the SuperNode (needs the NVIDIA Container Toolkit):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+services:
+  supernode:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU:-0}"]
+              capabilities: [gpu]

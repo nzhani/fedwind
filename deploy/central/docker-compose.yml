@@ -1,0 +1,199 @@
+# ArqauQuat central server (SITE_NETWORK_PLAN.md §1, M4): website, API, database, SuperLink,
+# central forecasting and the gateway. Plants run their own site kit (deploy/site/); no plant data
+# and no training happen here.
+#
+#   cp deploy/central/.env.example deploy/central/.env       # hosts, passwords, secrets
+#   docker compose -f deploy/central/docker-compose.yml up -d --build
+#   deploy/central/certs.sh issue                            # Let's Encrypt for both hosts
+#   deploy/central/check_ports.sh <public address>           # only 80 and 443 answer
+#
+# Published: gateway 80 (Let's Encrypt, redirect) and 443 only. Everything else is on the private
+# Compose network: SuperLink 9091/9092/9093, Postgres, the API, inference.
+# The lab stack (deploy/docker-compose.yml: ten lab sites, per-site inference) stays for experiments.
+
+name: arqauquat-central
+
+x-flower: &flower
+  image: fedwind-flower:latest
+  pull_policy: never
+  restart: unless-stopped
+  environment: &flower-env
+    OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
+
+services:
+  # One-shot on every `up`: internal CA, SuperLink TLS (renewed when < 30 days left), placeholder
+  # public certificates until Let's Encrypt has run
+  pki-init:
+    <<: *flower
+    build:
+      context: ../..
+      dockerfile: deploy/flower/Dockerfile
+      args:
+        # The central server needs no GPU (training happens at the plants)
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+    restart: "no"
+    entrypoint: ["python", "/opt/pki_init.py"]
+    environment:
+      WEB_HOST: ${WEB_HOST:?set WEB_HOST in deploy/central/.env}
+      SITES_HOST: ${SITES_HOST:?set SITES_HOST in deploy/central/.env}
+    volumes:
+      - ./pki_init.py:/opt/pki_init.py:ro
+      - internal-ca:/internal-ca
+      - superlink-tls:/superlink-tls
+      - internal-trust:/internal-trust
+      - gateway-certs:/certs
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fedwind
+      POSTGRES_USER: fedwind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/central/.env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fedwind -d fedwind"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  superlink:
+    <<: *flower
+    command:
+      - flower-superlink
+      - --ssl-ca-certfile=/tls/ca.crt
+      - --ssl-certfile=/tls/superlink.crt
+      - --ssl-keyfile=/tls/superlink.key
+      # Only SuperNodes whose key the API registered at enrollment (flwr supernode register)
+      - --enable-supernode-auth
+      - --serverappio-api-address=0.0.0.0:9091
+      - --fleet-api-address=0.0.0.0:9092
+      - --control-api-address=0.0.0.0:9093
+    volumes:
+      - superlink-tls:/tls:ro
+      - ${CENTRAL_DATA:-./data}/runs:/data/runs
+      - ${CENTRAL_DATA:-./data}/hf-cache:/hf-cache:ro
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
+
+  api:
+    build:
+      context: ../../federated-website/FastApi
+    environment:
+      ENV: production
+      DATABASE_URL: postgresql://fedwind:${POSTGRES_PASSWORD}@db:5432/fedwind
+      FRONTEND_URL: https://${WEB_HOST}
+      FEDWIND_DATA_DIR: /data
+      FEDWIND_SITES_SEED: /seed/sites.json              # empty: no lab sites on the central server
+      FEDERATION_ADDRESS: superlink:9093
+      FLOWER_APP_DIR: /flower_app
+      FLWR_FEDERATION: central                          # TLS to the Control API (flower_app/pyproject.toml)
+      FLWR_HOME: /tmp/flwr-home
+      SERVER_RUNS_DIR: /data/runs
+      INFERENCE_URL_TEMPLATE: ""                        # no per-site lab inference here
+      INFERENCE_CENTRAL_URL: http://inference-central:8000
+      SESSION_COOKIE_SECURE: "true"
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      SUPPORT_CHAT_ID: ${SUPPORT_CHAT_ID:-}
+      TRUST_PROXY_HEADERS: "true"                       # the gateway replaces X-Forwarded-For
+      # Plants: client certificates via the gateway, SuperNode keys registered with Flower
+      SITE_AUTH_MODE: mtls
+      FLOWER_NODE_AUTH: "on"
+      GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET:?set GATEWAY_SHARED_SECRET in deploy/central/.env}
+      SITE_API_PUBLIC_URL: https://${SITES_HOST}
+      HEARTBEAT_S: ${HEARTBEAT_S:-60}
+      SITE_CA_DIR: /secrets/site-ca                     # ca.key: only the API mounts this volume
+      SITE_CA_PUBLIC_DIR: /site-ca-public               # ca.crt + crl.pem for the gateway
+      # Training (SITE_NETWORK_PLAN.md §7): weekly runs, which plants may join
+      TRAIN_SCHEDULE: ${TRAIN_SCHEDULE:-}
+      TRAIN_SCHEDULE_TZ: ${TRAIN_SCHEDULE_TZ:-Asia/Almaty}
+      TRAIN_MIN_SITES: ${TRAIN_MIN_SITES:-3}
+      TRAIN_MIN_HOURS: ${TRAIN_MIN_HOURS:-2160}
+      TRAIN_SAMPLE_ABOVE: ${TRAIN_SAMPLE_ABOVE:-30}
+    volumes:
+      - ${CENTRAL_DATA:-./data}:/data
+      - ./seed:/seed:ro
+      - ../../Long-term_Forecasting/flower_app:/flower_app:ro
+      - internal-trust:/internal-trust:ro
+      - site-ca:/secrets/site-ca
+      - site-ca-public:/site-ca-public
+    depends_on:
+      db:
+        condition: service_healthy
+      pki-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../../federated-website
+      args:
+        NEXT_PUBLIC_API_URL: ""
+        API_INTERNAL_URL: http://api:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  inference-central:
+    <<: *flower
+    entrypoint: ["uvicorn", "app:app", "--app-dir", "/opt/fedwind/inference", "--host", "0.0.0.0", "--port", "8000"]
+    environment: { <<: *flower-env, MODELS_ROOT: /models }
+    volumes:
+      - ${CENTRAL_DATA:-./data}/models:/models:ro
+      - ${CENTRAL_DATA:-./data}/hf-cache:/hf-cache:ro
+
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      WEB_HOST: ${WEB_HOST}
+      SITES_HOST: ${SITES_HOST}
+      GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET}
+    volumes:
+      - ./nginx/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/proxy-headers.conf:/etc/nginx/snippets/proxy-headers.conf:ro
+      - ./nginx/90-reload-on-change.sh:/docker-entrypoint.d/90-reload-on-change.sh:ro
+      - gateway-certs:/certs:ro
+      - site-ca-public:/site-ca:ro
+      - internal-trust:/internal-trust:ro
+      - acme-webroot:/var/www/acme:ro
+    depends_on:
+      api:
+        condition: service_healthy     # the API publishes ca.crt and crl.pem on its first start
+      web:
+        condition: service_started
+      superlink:
+        condition: service_started
+    restart: unless-stopped
+
+  # Let's Encrypt (deploy/central/certs.sh issue|renew); not a running service
+  certbot:
+    image: certbot/certbot:v3.0.1
+    profiles: ["tools"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - acme-webroot:/var/www/acme
+      - gateway-certs:/certs
+    restart: "no"
+
+volumes:
+  db-data:
+  internal-ca:        # internal CA key: pki-init only
+  superlink-tls:      # SuperLink certificate and key
+  internal-trust:     # internal CA certificate (API, gateway)
+  site-ca:            # site CA key: API only. Back up ca.key offline.
+  site-ca-public:     # site CA certificate + CRL for the gateway
+  gateway-certs:      # public certificates (placeholder, then Let's Encrypt)
+  letsencrypt:
+  acme-webroot:

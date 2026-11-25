@@ -4,18 +4,15 @@
 
 import { ReactNode } from "react"
 import { AlertCircle, PlugZap } from "lucide-react"
-import { SectionHeader } from "@/components/section-header"
-import { cn } from "@/lib/utils"
+import { RunPill } from "@/components/fw/status"
 import { PlatformApiError, type RunStatus } from "@/lib/platform-api"
 
 export function PageHeader({ badge, title, description }: { badge: string; title: string; description: string }) {
   return (
-    <section className="bg-gradient-to-b from-primary/5 to-background">
-      <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-16 lg:px-8">
-        <div className="mx-auto max-w-3xl text-center">
-          <SectionHeader badge={badge} title={title} description={description} centered />
-        </div>
-      </div>
+    <section className="mx-auto max-w-[1280px] px-5 pb-10 pt-8 sm:px-10">
+      <div className="fw-label mb-3">{badge}</div>
+      <h1 className="fw-page-title max-w-[900px] text-ink">{title}</h1>
+      {description && <p className="mt-3 max-w-[680px] text-base leading-6 text-fw-muted">{description}</p>}
     </section>
   )
 }
@@ -23,11 +20,11 @@ export function PageHeader({ badge, title, description }: { badge: string; title
 /** 503 from the API: it works, but the federation or inference isn't connected yet. */
 export function NotConnectedNotice({ title, message, children }: { title: string; message: string; children?: ReactNode }) {
   return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 flex items-start gap-3">
-      <PlugZap className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+    <div className="flex items-start gap-3 rounded-[12px] bg-paper-warm px-4 py-3 text-sm">
+      <PlugZap className="mt-0.5 h-4 w-4 shrink-0 text-ink" />
       <div className="space-y-1">
-        <h4 className="font-semibold text-amber-900">{title}</h4>
-        <p className="text-sm text-amber-800">{message}</p>
+        <h4 className="font-medium text-ink">{title}</h4>
+        <p className="text-fw-muted">{message}</p>
         {children}
       </div>
     </div>
@@ -36,11 +33,11 @@ export function NotConnectedNotice({ title, message, children }: { title: string
 
 export function ErrorNotice({ title = "Error", message }: { title?: string; message: string }) {
   return (
-    <div className="rounded-lg border border-red-200 bg-red-50 p-4 flex items-start gap-3">
-      <AlertCircle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
+    <div role="alert" className="flex items-start gap-3 rounded-[12px] bg-fw-accent-soft px-4 py-3 text-sm">
+      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-fw-accent-dark" />
       <div>
-        <h4 className="font-semibold text-red-800">{title}</h4>
-        <p className="text-sm text-red-700">{message}</p>
+        <h4 className="font-medium text-ink">{title}</h4>
+        <p className="break-words text-fw-muted">{message}</p>
       </div>
     </div>
   )
@@ -57,21 +54,8 @@ export function ApiErrorNotice({ error, notConnectedTitle }: { error: unknown; n
   return <ErrorNotice message={error instanceof Error ? error.message : String(error)} />
 }
 
-const STATUS_STYLES: Record<RunStatus, string> = {
-  queued: "bg-slate-100 text-slate-700",
-  running: "bg-blue-100 text-blue-700",
-  done: "bg-green-100 text-green-700",
-  failed: "bg-red-100 text-red-700",
-  stopped: "bg-amber-100 text-amber-800",
-}
-
 export function RunStatusBadge({ status }: { status: RunStatus }) {
-  return (
-    <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium", STATUS_STYLES[status])}>
-      {status === "running" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600" />}
-      {status}
-    </span>
-  )
+  return <RunPill status={status} />
 }
 
 export function formatTimestamp(iso: string | null | undefined): string {

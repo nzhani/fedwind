@@ -10,7 +10,8 @@
  *   4. deleteFile()    -> DELETE /api/files/{fn} (remove a file)
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001"
+// Empty: the API on this website's own address (/api, forwarded by next.config.mjs)
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "")
 const TRAINING_API_URL = process.env.NEXT_PUBLIC_TRAINING_API_URL || API_BASE_URL
 
 

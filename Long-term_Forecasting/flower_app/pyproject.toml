@@ -115,6 +115,13 @@ round-timeout = 3600.0     # seconds per round before missing clients count as d
 checkpoint-every = 5
 resume-from = ""           # checkpoint path, absolute or relative to runs-dir (FR-14)
 
+# Energy type (FR-08). Solar runs use dataset-name = "KZSOLAR" and my_flower_app/solar.py.
+energy-type = "wind"       # wind | solar
+solar-target = "kstar"     # kstar (clear-sky index, converted back to GHI) | ghi
+daylight-mask = true       # solar: the loss counts daylight target hours only
+min-elevation = 5.0        # solar: degrees of sun elevation that count as daylight
+kstar-max = 1.2            # solar: k* is clipped to [0, kstar-max]
+
 
 ################################################################################
 # DEFAULT FEDERATION
@@ -223,6 +230,12 @@ options.backend.actor = { framework = "torch", device = "cuda" }
 [tool.flwr.federations.lab]
 address = "superlink:9093"
 insecure = true
+
+# Central server (deploy/central): TLS to the Control API with the internal CA, which the
+# pki-init service writes into the internal-trust volume (mounted in the API container)
+[tool.flwr.federations.central]
+address = "superlink:9093"
+root-certificates = "/internal-trust/ca.crt"
 
 [tool.flwr.federations.local-deployment]
 address = "127.0.0.1:9093"

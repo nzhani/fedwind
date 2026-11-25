@@ -98,11 +98,16 @@ _RUN_CONFIG_KEYS = {
 
 
 def to_run_config(config: Dict[str, Any], run_id: str, server_runs_dir: str, partition_sites: List[str]) -> Dict[str, Any]:
+    if not config.get("sites"):
+        # An empty site-names would select every SuperNode, wind and solar alike
+        raise ValueError("The run config names no sites")
     rc: Dict[str, Any] = {flwr: config[key] for key, flwr in _RUN_CONFIG_KEYS.items() if key in config}
     rc["round-timeout"] = float(rc.get("round-timeout", 900))
+    solar = str(config.get("energy_type", "wind")) == "solar"
     rc.update({
-        "dataset-name": str(config.get("dataset", "kzmet")).upper(),
-        "target-column": "WS50M",
+        "energy-type": "solar" if solar else "wind",
+        "dataset-name": str(config.get("dataset") or ("kzsolar" if solar else "kzmet")).upper(),
+        "target-column": ("KSTAR" if config.get("solar_target", "kstar") == "kstar" else "GHI") if solar else "WS50M",
         "run-id": run_id,
         "runs-dir": server_runs_dir,
         "site-names": ",".join(config["sites"]),
@@ -111,6 +116,9 @@ def to_run_config(config: Dict[str, Any], run_id: str, server_runs_dir: str, par
         "resume-from": config.get("resume_from") or "",
         "save-predictions": False,
     })
+    if solar:
+        rc["solar-target"] = str(config.get("solar_target", "kstar"))
+        rc["daylight-mask"] = bool(config.get("daylight_mask", True))
     return rc
 
 
@@ -177,7 +185,8 @@ class FlwrCliFederation:
         with open(config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f)
         sites = sorted(
-            (s for s in list_sites(get_settings(), EnergyType.WIND) if s.partition_id is not None),
+            # Every SuperNode of the federation (wind and solar), in partition-id order
+            (s for s in list_sites(get_settings()) if s.partition_id is not None),
             key=lambda s: s.partition_id,
         )
         rc = to_run_config(config, run_id, self.server_runs_dir, [s.id for s in sites])

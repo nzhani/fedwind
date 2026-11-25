@@ -3,8 +3,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-ARG NEXT_PUBLIC_API_URL=http://localhost:8001
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Empty = the browser calls /api on the website itself, forwarded to API_INTERNAL_URL (next.config.mjs)
+ARG NEXT_PUBLIC_API_URL=
+ARG API_INTERNAL_URL=http://api:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL API_INTERNAL_URL=$API_INTERNAL_URL
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 

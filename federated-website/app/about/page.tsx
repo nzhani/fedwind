@@ -41,7 +41,7 @@ export default function AboutPage() {
           <div className="mx-auto max-w-3xl text-center">
             <SectionHeader
               badge="About the Project"
-              title="FedWind Research Project"
+              title="ArqauQuat Research Project"
               description="A university research initiative developing privacy-preserving machine learning solutions for renewable energy forecasting."
               centered
             />
@@ -66,7 +66,7 @@ export default function AboutPage() {
                 centralizing sensitive operational data, creating privacy and competitive concerns.
               </p>
               <p>
-                <strong className="text-foreground">FedWind</strong> addresses this challenge by combining 
+                <strong className="text-foreground">ArqauQuat</strong> addresses this challenge by combining 
                 Federated Learning with Transformer-based Large Language Models. Our approach enables multiple 
                 wind farm operators to collaboratively train a powerful forecasting model while keeping their 
                 data completely private and under their control.
@@ -309,7 +309,7 @@ export default function AboutPage() {
               Academic Research Project
             </h2>
             <p className="mt-4 text-muted-foreground leading-relaxed">
-              FedWind is developed as part of university research focused on the intersection of privacy-preserving 
+              ArqauQuat is developed as part of university research focused on the intersection of privacy-preserving 
               machine learning and renewable energy systems. The project aims to demonstrate that collaborative 
               learning can achieve comparable or superior results to centralized approaches while maintaining 
               strict data privacy guarantees.

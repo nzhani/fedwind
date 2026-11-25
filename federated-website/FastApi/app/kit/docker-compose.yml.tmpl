@@ -1,0 +1,65 @@
+# ArqauQuat site kit for {{SITE_NAME}} ({{SITE_ID}})
+#
+#   docker compose up -d            the agent enrolls the plant once (keys made here), then reports;
+#                                   with COMPOSE_PROFILES=federation (.env) the tunnel and the Flower
+#                                   SuperNode start as soon as enrollment has finished
+#   docker compose logs -f agent    or the status page: http://localhost:8080 (on this server)
+#   GPU: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+name: fedwind-site-{{SITE_ID}}
+
+services:
+  agent:
+    image: ${AGENT_IMAGE:-fedwind-site-agent:0.2.0}
+    env_file: .env
+    volumes:
+      - ./secrets:/secrets          # keys made here at enrollment and the certificates (keep private)
+      - ./data:/data                # inbox/ for exports, store/ for the hourly table
+      - ./enrollment.token:/kit/enrollment.token:ro
+    ports:
+      - "127.0.0.1:${STATUS_HOST_PORT:-8080}:8080"   # status page, this server only: http://localhost:8080
+    healthcheck:                    # healthy = enrolled with a certificate and the tunnel's local TLS
+      test: ["CMD", "python", "-c", "import os,sys; sys.exit(0 if all(os.path.isfile('/secrets/' + f) for f in ('site.crt', 'tunnel.crt')) else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 1h              # first enrollment may wait for the network
+    restart: unless-stopped
+
+  # Holds the plant certificate: SuperNode --TLS--> tunnel ==mTLS==> {{GATEWAY_HOST}}:443
+  tunnel:
+    image: nginx:1.27-alpine
+    profiles: ["federation"]
+    environment:
+      GATEWAY_HOST: ${GATEWAY_HOST}
+      GATEWAY_CA_FILE: ${GATEWAY_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
+    volumes:
+      - ./tunnel.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./secrets:/pki:ro
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Flower client: trains on this plant's data when a run comes; only model updates leave
+  supernode:
+    image: ${SUPERNODE_IMAGE:-fedwind-flower:latest}
+    profiles: ["federation"]
+    command:
+      - flower-supernode
+      - --superlink=tunnel:9092
+      - --root-certificates=/secrets/local-ca.crt
+      - --auth-supernode-private-key=/secrets/flower.key
+      - --clientappio-api-address=0.0.0.0:9094
+      - --node-config=site="{{SITE_ID}}" energy="{{ENERGY_TYPE}}" data-root="/data/store"
+    environment:
+      FLOWER_EXP_DIR: /outputs
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - ./secrets:/secrets:ro
+      - ./data:/data:ro
+      - ./outputs:/outputs
+      - ${HF_CACHE:-./hf-cache}:/hf-cache:ro
+    depends_on:
+      - tunnel
+    restart: unless-stopped

@@ -1,0 +1,139 @@
+# M0 spike (SITE_NETWORK_PLAN.md §11): Flower 1.25 behind an mTLS gateway.
+#
+#   ./make_certs.sh                                   # test PKI in ./pki
+#   SPIKE_DATA=<dir with sites/ and hf-cache/> docker compose up -d superlink gateway tunnel-site1 tunnel-site2 admin prober
+#   ./spike.sh                                        # register, train, negative tests
+#
+# Networks stand in for the real topology:
+#   central   inside the central server (superlink, gateway, admin) — not reachable from outside
+#   internet  the public side: gateway is "sites.fedwind.test:443"; plant tunnels and a prober
+#   siteN     each plant's LAN: its SuperNode can reach only its own tunnel
+name: fedwind-spike
+
+x-flower: &flower
+  image: fedwind-flower:latest
+  pull_policy: never
+  environment: &env
+    OMP_NUM_THREADS: "2"
+
+networks:
+  central: { internal: true }
+  internet: { internal: true }
+  site1: { internal: true }
+  site2: { internal: true }
+
+services:
+  superlink:
+    <<: *flower
+    command:
+      - flower-superlink
+      - --ssl-ca-certfile=/certs/internal-ca.crt
+      - --ssl-certfile=/certs/superlink.crt
+      - --ssl-keyfile=/certs/superlink.key
+      - --enable-supernode-auth
+      - --serverappio-api-address=0.0.0.0:9091
+      - --fleet-api-address=0.0.0.0:9092
+      - --control-api-address=0.0.0.0:9093
+    volumes:
+      - ./pki/internal-ca.crt:/certs/internal-ca.crt:ro
+      - ./pki/superlink.crt:/certs/superlink.crt:ro
+      - ./pki/superlink.key:/certs/superlink.key:ro
+      - ${SPIKE_DATA}/hf-cache:/hf-cache:ro
+      - ${SPIKE_DATA}/runs:/runs
+    networks: [central]
+
+  gateway:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/gateway.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./pki/gateway.crt:/pki/gateway.crt:ro
+      - ./pki/gateway.key:/pki/gateway.key:ro
+      - ./pki/site-ca.crt:/pki/site-ca.crt:ro
+      - ./pki/site-ca.crl:/pki/site-ca.crl:ro
+      - ./pki/internal-ca.crt:/pki/internal-ca.crt:ro
+    depends_on: [superlink]
+    networks:
+      central: {}
+      internet: { aliases: [sites.fedwind.test] }
+
+  # --- plant 1 (konaev, solar): registered key, valid certificate -------------------------------
+  tunnel-site1:
+    image: nginx:1.27-alpine
+    environment: { GATEWAY_HOST: sites.fedwind.test }
+    volumes:
+      - ./nginx/tunnel.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./pki/tunnel.crt:/pki/tunnel.crt:ro
+      - ./pki/tunnel.key:/pki/tunnel.key:ro
+      - ./pki/site1.crt:/pki/client.crt:ro
+      - ./pki/site1.key:/pki/client.key:ro
+      - ./pki/web-ca.crt:/pki/web-ca.crt:ro
+    depends_on: [gateway]
+    networks:
+      internet: {}
+      site1: { aliases: [tunnel] }
+
+  supernode-site1:
+    <<: *flower
+    command: [flower-supernode, --superlink=tunnel:9092, --root-certificates=/certs/local-ca.crt,
+              --auth-supernode-private-key=/keys/flower-site1, --clientappio-api-address=0.0.0.0:9094,
+              "--node-config=partition-id=5 num-partitions=10 site=\"konaev\" data-root=\"/data/site\""]
+    environment: { <<: *env, FLOWER_EXP_DIR: /tmp }
+    volumes:
+      - ./pki/local-ca.crt:/certs/local-ca.crt:ro
+      - ./pki/flower-site1:/keys/flower-site1:ro
+      - ${SPIKE_DATA}/sites/konaev:/data/site:ro
+      - ${SPIKE_DATA}/hf-cache:/hf-cache:ro
+    depends_on: [tunnel-site1]
+    networks: [site1]
+
+  # --- plant 2 (saran): valid certificate, but its Flower key is never registered ------------------
+  tunnel-site2:
+    image: nginx:1.27-alpine
+    environment: { GATEWAY_HOST: sites.fedwind.test }
+    volumes:
+      - ./nginx/tunnel.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./pki/tunnel.crt:/pki/tunnel.crt:ro
+      - ./pki/tunnel.key:/pki/tunnel.key:ro
+      - ./pki/site2.crt:/pki/client.crt:ro
+      - ./pki/site2.key:/pki/client.key:ro
+      - ./pki/web-ca.crt:/pki/web-ca.crt:ro
+    depends_on: [gateway]
+    networks:
+      internet: {}
+      site2: { aliases: [tunnel] }
+
+  supernode-site2:
+    <<: *flower
+    command: [flower-supernode, --superlink=tunnel:9092, --root-certificates=/certs/local-ca.crt,
+              --auth-supernode-private-key=/keys/flower-site2, --clientappio-api-address=0.0.0.0:9094,
+              --max-retries=3,
+              "--node-config=partition-id=8 num-partitions=10 site=\"saran\" data-root=\"/data/site\""]
+    environment: { <<: *env, FLOWER_EXP_DIR: /tmp }
+    volumes:
+      - ./pki/local-ca.crt:/certs/local-ca.crt:ro
+      - ./pki/flower-site2:/keys/flower-site2:ro
+      - ${SPIKE_DATA}/sites/saran:/data/site:ro
+      - ${SPIKE_DATA}/hf-cache:/hf-cache:ro
+    depends_on: [tunnel-site2]
+    networks: [site2]
+
+  # --- operator side inside the central server: flwr CLI over the TLS Control API -----------------
+  admin:
+    <<: *flower
+    entrypoint: ["sleep", "infinity"]
+    environment: { <<: *env, FLWR_HOME: /tmp/flwr-home }
+    volumes:
+      - ../../Long-term_Forecasting/flower_app:/src/flower_app:ro
+      - ./pki/internal-ca.crt:/certs/internal-ca.crt:ro
+      - ./pki/flower-site1.pub:/keys/flower-site1.pub:ro
+      - ./pki/flower-site2.pub:/keys/flower-site2.pub:ro
+    networks: [central]
+
+  # --- someone on the internet: probes the gateway with and without certificates -------------------
+  prober:
+    <<: *flower
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ./pki:/pki:ro
+      - ./probe.py:/probe.py:ro
+    networks: [internet]

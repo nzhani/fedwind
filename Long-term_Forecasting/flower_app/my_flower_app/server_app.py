@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.INFO, format= '%(asctime)s - %(levelname)s - %
 from my_flower_app.task import DATASET_REGISTRY, Net, trainable_state_dict
 from my_flower_app.experiment import build_model_configs, seed_everything, site_names
 from my_flower_app.run_logging import RunLogger, array_bytes
+from my_flower_app import robust
 
 app = ServerApp()
 
@@ -91,10 +92,14 @@ class FedAvgWithMetrics(FedAvg):
         self.eval_history = defaultdict(list)
         # Set by outer training loop to expose the real round to eval configs.
         self.outer_round = 1
-        # Per-client metrics of the last round, keyed by partition-id (run logging)
+        # Per-client metrics of the last round, keyed by site id (or partition id for older
+        # clients) for run logging; updates refused by the checks in robust.py, with the reason
         self.round_train = {}
         self.round_eval = {}
+        self.round_rejected = {}
         self.round_uplink_bytes = None
+        # An update further from the global model than this x the round's median is left out (0 = off)
+        self.max_update_ratio = 5.0
 
         # Drift tracking
         self.current_global_arrays = None
@@ -121,6 +126,40 @@ class FedAvgWithMetrics(FedAvg):
         return kept
 
     @staticmethod
+    def _client_key(msg, metrics=None):
+        """Site id from the reply's "client" record (client_app._who), else the lab partition id."""
+        if msg.has_content() and "client" in msg.content:
+            rec = msg.content["client"]
+            site = (rec.data if hasattr(rec, "data") else rec).get("site")
+            if site:
+                return str(site)
+        if metrics is not None and "partition-id" in metrics and int(metrics["partition-id"]) >= 0:
+            return int(metrics["partition-id"])
+        return f"node-{msg.metadata.src_node_id}"
+
+    def _screen(self, replies):
+        """robust.screen on this round's updates; returns the replies to aggregate."""
+        self.round_rejected = {}
+        global_state = self.current_global_arrays.to_torch_state_dict() if self.current_global_arrays is not None else None
+        states, by_key = {}, {}
+        for msg in replies:
+            if msg.has_error() or not msg.has_content() or "arrays" not in msg.content:
+                continue
+            key = self._client_key(msg, self._metrics_of(msg))
+            states[key] = msg.content["arrays"].to_torch_state_dict()
+            by_key[key] = msg
+        if not states:
+            return replies
+        pers = self.personalization_keys
+        _, rejected = robust.screen(states, global_state, self.max_update_ratio,
+                                    skip=lambda k: any(pk in k for pk in pers))
+        for key, reason in rejected.items():
+            logging.warning(f"[ROBUST] Update from {key} left out: {reason}")
+        self.round_rejected = rejected
+        dropped = {id(by_key[k]) for k in rejected}
+        return [m for m in replies if id(m) not in dropped]
+
+    @staticmethod
     def _metrics_of(msg):
         if not msg.has_content() or "metrics" not in msg.content:
             return None
@@ -129,15 +168,15 @@ class FedAvgWithMetrics(FedAvg):
 
     def aggregate_train(self, server_round, replies):
         """Override to collect training metrics and compute client drift."""
-        replies = self._without_skipped(list(replies))
+        replies = self._screen(self._without_skipped(list(replies)))
         self.round_train = {}
         self.round_uplink_bytes = None
         for msg in replies:
             if msg.has_error():
                 continue
             m = self._metrics_of(msg)
-            if m is not None and "partition-id" in m:
-                self.round_train[int(m["partition-id"])] = m
+            if m is not None:
+                self.round_train[self._client_key(msg, m)] = m
             if self.round_uplink_bytes is None and msg.has_content() and "arrays" in msg.content:
                 self.round_uplink_bytes = array_bytes(msg.content["arrays"].to_torch_state_dict())
         self.avg_drift, self.max_drift = self._compute_drift(replies)
@@ -257,8 +296,8 @@ class FedAvgWithMetrics(FedAvg):
         self.round_eval = {}
         for msg in replies:
             m = None if msg.has_error() else self._metrics_of(msg)
-            if m is not None and "partition-id" in m:
-                self.round_eval[int(m["partition-id"])] = m
+            if m is not None:
+                self.round_eval[self._client_key(msg, m)] = m
         self.client_val_losses = []
         self.client_val_maes = []
         self.client_val_rmses = []
@@ -686,6 +725,9 @@ def _run(grid, context, run_logger, exp_dir, fraction_train, total_rounds, lr, b
             **min_nodes,
         )
 
+    # Robust aggregation (robust.py): leave out updates far from the round's median; 0 turns it off
+    strategy.max_update_ratio = float(context.run_config.get("max-update-norm-ratio", 5.0))
+
     if personalize:
         strategy.personalization_keys = _personalization_keys_for_model(model)
         logging.info(
@@ -890,6 +932,7 @@ def _run(grid, context, run_logger, exp_dir, fraction_train, total_rounds, lr, b
             line = run_logger.round(
                 r, total_rounds, round_duration, strategy.round_train, strategy.round_eval,
                 strategy.round_uplink_bytes, int(payload_sent_mb * 1024 * 1024),
+                rejected=strategy.round_rejected,
             )
             rounds_done = r
             if r % checkpoint_every == 0:

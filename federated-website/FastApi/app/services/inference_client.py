@@ -25,6 +25,10 @@ class InferenceUnavailable(Exception):
 class InferenceClient(Protocol):
     def forecast(self, site: str, horizon: int, as_of: Optional[str], model_path: str) -> Dict[str, Any]: ...
 
+    def forecast_window(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Central forecasting from a window a plant shared (POST {central}/forecast-window)."""
+        ...
+
 
 class NotConnectedInference:
     detail = "Inference not connected: no inference services are configured (INFERENCE_URL_TEMPLATE is unset)."
@@ -32,13 +36,30 @@ class NotConnectedInference:
     def forecast(self, site: str, horizon: int, as_of: Optional[str], model_path: str) -> Dict[str, Any]:
         raise InferenceUnavailable(self.detail)
 
+    def forecast_window(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        raise InferenceUnavailable("Central forecasting not connected (INFERENCE_CENTRAL_URL is unset).")
+
 
 class HttpInferenceClient:
-    def __init__(self, url_template: str, timeout_s: float = 10.0):
+    def __init__(self, url_template: Optional[str], timeout_s: float = 10.0, central_url: Optional[str] = None):
         self.url_template = url_template
         self.timeout_s = timeout_s
+        self.central_url = central_url
+
+    def forecast_window(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.central_url:
+            raise InferenceUnavailable("Central forecasting not connected (INFERENCE_CENTRAL_URL is unset).")
+        try:
+            resp = requests.post(self.central_url.rstrip("/") + "/forecast-window", json=body, timeout=30)
+        except requests.RequestException as e:
+            raise InferenceUnavailable(f"Central forecasting is unreachable: {e}") from e
+        if resp.status_code != 200:
+            raise InferenceUnavailable(f"Central forecasting returned {resp.status_code}: {resp.text[:300]}")
+        return resp.json()
 
     def forecast(self, site: str, horizon: int, as_of: Optional[str], model_path: str) -> Dict[str, Any]:
+        if not self.url_template:
+            raise InferenceUnavailable(NotConnectedInference.detail)
         url = self.url_template.format(site=site).rstrip("/") + "/forecast"
         try:
             resp = requests.post(
@@ -57,6 +78,6 @@ class HttpInferenceClient:
 
 def get_inference() -> InferenceClient:
     settings = get_settings()
-    if settings.inference_url_template:
-        return HttpInferenceClient(settings.inference_url_template)
+    if settings.inference_url_template or settings.inference_central_url:
+        return HttpInferenceClient(settings.inference_url_template, central_url=settings.inference_central_url)
     return NotConnectedInference()

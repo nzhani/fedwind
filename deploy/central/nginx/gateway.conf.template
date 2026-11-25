@@ -1,0 +1,123 @@
+# ArqauQuat central gateway (SITE_NETWORK_PLAN.md §1–2): the only published service.
+#   ${WEB_HOST}    people: website and user API, server TLS
+#   ${SITES_HOST}  plants: client certificate from the site CA (not revoked) for everything except
+#                  /site-api/enroll, which a new plant calls with its one-time token before it has one
+# The nginx image fills ${...} from the environment; $nginx_variables stay as they are.
+
+log_format gateway '$remote_addr $host cn="$client_cn" verify=$ssl_client_verify $status "$request" '
+                   '$body_bytes_sent $request_time';
+access_log /dev/stdout gateway;
+
+# CN of the verified plant certificate = site id (the site CA puts nothing else there)
+map $ssl_client_s_dn $client_cn {
+    "~(^|,)CN=(?<cn>[^,]+)" $cn;
+    default "";
+}
+
+limit_req_zone $binary_remote_addr zone=enroll:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=login:10m rate=30r/m;
+
+server_tokens off;
+proxy_headers_hash_max_size 1024;
+proxy_headers_hash_bucket_size 128;
+
+# --- port 80: Let's Encrypt challenges, everything else to https -----------------------------------
+server {
+    listen 80;
+    server_name ${WEB_HOST} ${SITES_HOST};
+    location /.well-known/acme-challenge/ { root /var/www/acme; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+# Unknown names (scanners hitting the IP) get nothing
+server {
+    listen 80 default_server;
+    listen 443 ssl default_server;
+    ssl_reject_handshake on;
+    return 444;
+}
+
+# --- people -----------------------------------------------------------------------------------------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${WEB_HOST};
+
+    ssl_certificate     /certs/live/${WEB_HOST}/fullchain.pem;
+    ssl_certificate_key /certs/live/${WEB_HOST}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    client_max_body_size 200m;                      # experiment page: one CSV per site
+
+    # User API straight to the API (no detour through the web server)
+    location /api/ {
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_pass http://api:8000;
+    }
+    location = /api/auth/login {
+        limit_req zone=login burst=10 nodelay;
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_pass http://api:8000;
+    }
+    location = /health {
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_pass http://api:8000;
+    }
+    # Plants use ${SITES_HOST}; the site API isn't served to browsers
+    location /site-api/ { return 404; }
+
+    location / {
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $http_connection;
+        proxy_pass http://web:3000;
+    }
+}
+
+# --- plants -----------------------------------------------------------------------------------------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${SITES_HOST};
+
+    ssl_certificate         /certs/live/${SITES_HOST}/fullchain.pem;   # public (Let's Encrypt)
+    ssl_certificate_key     /certs/live/${SITES_HOST}/privkey.pem;
+    ssl_protocols           TLSv1.2 TLSv1.3;
+    ssl_client_certificate  /site-ca/ca.crt;        # plant certificates from the site CA only
+    ssl_verify_client       optional;               # required below, except for enrollment
+    ssl_verify_depth        1;
+    ssl_crl                 /site-ca/crl.pem;       # revoked plants: a presented bad certificate gets 400
+    client_max_body_size    1g;                     # model updates (75 MB per round at 72 h today)
+
+    # A new plant has no certificate yet: one-time token, rate-limited
+    location = /site-api/enroll {
+        limit_req zone=enroll burst=5 nodelay;
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_pass http://api:8000;
+    }
+
+    location /site-api/ {
+        if ($ssl_client_verify != SUCCESS) { return 403; }
+        include /etc/nginx/snippets/proxy-headers.conf;
+        # Only the gateway can set these; the API checks the secret, then CN + serial against the
+        # site's live certificate (app/site_auth.py)
+        proxy_set_header X-Site-Id        $client_cn;
+        proxy_set_header X-Client-Serial  $ssl_client_serial;
+        proxy_set_header X-Gateway-Secret "${GATEWAY_SHARED_SECRET}";
+        proxy_pass http://api:8000;
+    }
+
+    # Flower Fleet API only; the Control (9093) and ServerAppIo (9091) APIs are never proxied
+    location /flwr.proto.Fleet/ {
+        if ($ssl_client_verify != SUCCESS) { return 403; }
+        grpc_pass                    grpcs://superlink:9092;
+        grpc_ssl_trusted_certificate /internal-trust/ca.crt;
+        grpc_ssl_verify              on;
+        grpc_ssl_name                superlink;
+        grpc_ssl_server_name         on;
+        grpc_read_timeout            900s;
+        grpc_send_timeout            900s;
+    }
+
+    location / { return 404; }
+}

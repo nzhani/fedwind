@@ -3,7 +3,7 @@
 # Same wiring as deploy/docker-compose.yml, for a machine without Docker or for a
 # quick laptop test. Ctrl+C stops everything.
 #
-#   deploy/scripts/run_local_federation.sh                 # all five sites
+#   deploy/scripts/run_local_federation.sh                 # all ten sites (5 wind + 5 solar)
 #   SITES="almaty aktau" deploy/scripts/run_local_federation.sh
 #
 # Then, from Long-term_Forecasting/flower_app:
@@ -17,8 +17,8 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN="${PYTHON_BIN:-$REPO/Long-term_Forecasting/.venv/bin}"
 DATA_DIR="${DATA_DIR:-$REPO/deploy/data}"
 LOG_DIR="${LOG_DIR:-$DATA_DIR/federation-logs}"
-SITES=(${SITES:-almaty zhezkazgan aktau taraz aktobe})
-ALL_SITES=(almaty zhezkazgan aktau taraz aktobe)   # partition-id order (deploy/seed/sites.json)
+SITES=(${SITES:-almaty zhezkazgan aktau taraz aktobe konaev shymkent kyzylorda saran turkistan})
+ALL_SITES=(almaty zhezkazgan aktau taraz aktobe konaev shymkent kyzylorda saran turkistan)   # partition-id order (deploy/seed/sites.json)
 
 export PATH="$BIN:$PATH"   # SuperLink/SuperNode start flower-superexec by name
 export FEDWIND_ML_ROOT="$REPO/Long-term_Forecasting"

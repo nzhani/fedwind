@@ -19,6 +19,9 @@ from typing import Dict
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
 
+from app.auth import client_ip, require_admin
+from app.services import accounts
+from app.services.accounts import User
 from app.platform_schemas import (
     ACTIVE_STATUSES,
     EnergyType,
@@ -29,8 +32,7 @@ from app.platform_schemas import (
 )
 from app.services import run_store
 from app.services.federation_client import FederationClient, FederationUnavailable, get_federation
-from app.services.site_registry import active_site_ids
-from app.services.wind_csv import CsvValidationError, validate_wind_csv
+from app.services import run_launcher
 from app.settings import get_settings
 
 router = APIRouter(prefix="/api")
@@ -72,7 +74,8 @@ def get_run(run_id: str, federation: FederationClient = Depends(get_federation))
 
 
 @router.post("/runs", response_model=RunDetail, status_code=status.HTTP_201_CREATED, summary="Start a run")
-async def start_run(request: Request, federation: FederationClient = Depends(get_federation)):
+async def start_run(request: Request, federation: FederationClient = Depends(get_federation),
+                    admin: User = Depends(require_admin)):
     settings = get_settings()
     form = await request.form()
 
@@ -84,71 +87,23 @@ async def start_run(request: Request, federation: FederationClient = Depends(get
     except ValidationError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, json.loads(e.json(include_url=False)))
 
-    known = set(active_site_ids(settings, EnergyType.WIND))
-    unknown = [s for s in config.sites if s not in known]
-    if unknown:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown or inactive sites: {', '.join(unknown)}")
-
-    # 2. Uploads: all or nothing, one per selected site
+    # 2. Uploads (one CSV per site), sites, start (app/services/run_launcher.py)
     uploads: Dict[str, bytes] = {}
     for key, value in form.multi_items():
         if key.startswith("file_") and hasattr(value, "read"):
             uploads[key[len("file_"):]] = await value.read()
-    if uploads:
-        extra = sorted(set(uploads) - set(config.sites))
-        missing = sorted(set(config.sites) - set(uploads))
-        if extra or missing:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"Upload one CSV per selected site. Missing: {missing or 'none'}; not selected: {extra or 'none'}",
-            )
-        for site, content in uploads.items():
-            try:
-                validate_wind_csv(content)
-            except CsvValidationError as e:
-                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{site}: {e}")
-        config = config.model_copy(update={"data_source": "upload"})
-    elif config.data_source == "upload":
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "data_source is 'upload' but no files were sent")
-
-    with run_store.create_lock:
-        # 3. One run at a time
-        active = run_store.active_run(settings)
-        if active is not None:
-            raise HTTPException(status.HTTP_409_CONFLICT, f"Run '{active.run_id}' is still {active.status}")
-
-        # 4. Federation reachable with enough clients
-        fed = federation.status()
-        if not fed.connected:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, fed.detail)
-        if fed.connected_nodes is not None and fed.connected_nodes < config.min_train_clients:
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                f"Only {fed.connected_nodes} clients connected; the config needs {config.min_train_clients}",
-            )
-
-        # 5. Create the run, place uploads in each site's own folder, start it
-        run_id = run_store.new_run_id(config)
-        folder = run_store.create_run(settings, run_id, config)
-        for site, content in uploads.items():
-            site_uploads = settings.sites_dir / site / "uploads"
-            site_uploads.mkdir(parents=True, exist_ok=True)
-            (site_uploads / f"{run_id}.csv").write_bytes(content)
-
-        try:
-            flower_run_id = federation.start_run(run_id, folder / "config.yaml")
-        except FederationUnavailable as e:
-            run_store.update_run(settings, run_id, status="failed", error=str(e), finished_at=run_store.utc_now())
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
-        run_store.update_run(
-            settings, run_id, status="running", flower_run_id=flower_run_id, started_at=run_store.utc_now()
-        )
-
-    return run_store.get_run(settings, run_id)
+    try:
+        run = run_launcher.launch(settings, config, federation, uploads)
+    except run_launcher.LaunchError as e:
+        raise HTTPException(e.status, e.message)
+    accounts.record("run.start", admin, run.run_id, {"energy_type": config.energy_type.value, "horizon": config.horizon,
+                                                     "sites": run.config.get("sites")}, client_ip(request))
+    return run
 
 
 @router.post("/runs/{run_id}/stop", response_model=RunDetail, summary="Stop the active run")
-def stop_run(run_id: str, federation: FederationClient = Depends(get_federation)):
+def stop_run(run_id: str, request: Request, federation: FederationClient = Depends(get_federation),
+             admin: User = Depends(require_admin)):
     settings = get_settings()
     run = run_store.get_run(settings, run_id)
     if run is None:
@@ -161,4 +116,5 @@ def stop_run(run_id: str, federation: FederationClient = Depends(get_federation)
         except FederationUnavailable as e:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
     run_store.update_run(settings, run_id, status="stopped", finished_at=run_store.utc_now())
+    accounts.record("run.stop", admin, run_id, ip=client_ip(request))
     return run_store.get_run(settings, run_id)

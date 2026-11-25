@@ -10,7 +10,12 @@ Storage now uses SQLite instead of JSONL.
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+import hmac
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from app.auth import require_admin
 from pydantic import BaseModel, Field
 
 from app.services.feedback_db import (
@@ -361,7 +366,7 @@ async def list_public_answers():
     return PublicAnswersResponse(entries=public_entries, total=len(public_entries))
 
 
-@router.post("/telegram/set-webhook")
+@router.post("/telegram/set-webhook", dependencies=[Depends(require_admin)])
 async def setup_telegram_webhook(payload: TelegramWebhookSetupRequest):
     base_url = payload.public_base_url.strip().rstrip("/")
     webhook_url = f"{base_url}/api/feedback/telegram/webhook"
@@ -376,7 +381,7 @@ async def setup_telegram_webhook(payload: TelegramWebhookSetupRequest):
     }
 
 
-@router.get("/telegram/webhook-info")
+@router.get("/telegram/webhook-info", dependencies=[Depends(require_admin)])
 async def telegram_webhook_info():
     result = get_telegram_webhook_info()
     return {
@@ -385,7 +390,7 @@ async def telegram_webhook_info():
     }
 
 
-@router.post("/telegram/delete-webhook")
+@router.post("/telegram/delete-webhook", dependencies=[Depends(require_admin)])
 async def remove_telegram_webhook():
     result = delete_telegram_webhook()
     return {
@@ -397,7 +402,20 @@ async def remove_telegram_webhook():
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
+    # Only Telegram knows the secret set with setWebhook (TELEGRAM_WEBHOOK_SECRET)
+    secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if secret and not hmac.compare_digest(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), secret):
+        raise HTTPException(status_code=403, detail="Forbidden")
     update: Any = await request.json()
+
+    # /start <code> and /stop connect or disconnect Telegram alerts (app/services/notifications.py)
+    from app.services import notifications
+
+    try:
+        if notifications.handle_update(update):
+            return {"ok": True, "handled": "alerts"}
+    except Exception as e:  # database down: Telegram retries the update later
+        raise HTTPException(status_code=503, detail=f"Alerts unavailable: {type(e).__name__}")
 
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -455,7 +473,7 @@ async def telegram_webhook(request: Request):
     }
 
 
-@router.delete("/{feedback_id}")
+@router.delete("/{feedback_id}", dependencies=[Depends(require_admin)])
 async def delete_feedback(feedback_id: str):
     deleted = delete_conversation(feedback_id)
 

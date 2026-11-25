@@ -10,8 +10,9 @@ Also: seeding (bug 8) and where a client finds its own data (T1.4).
 
 import os
 import random
+import zlib
 from types import SimpleNamespace
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -65,6 +66,8 @@ _MODEL_KEYS = {
 def build_model_configs(run_config: Mapping) -> SimpleNamespace:
     """Model configs from the run config; the only way server and clients build Net."""
     kwargs = {arg: run_config.get(key, default) for key, (arg, default) in _MODEL_KEYS.items()}
+    # The label window is the tail of the input window; it can't be longer than the input
+    kwargs["label_len"] = min(int(kwargs["label_len"]), int(kwargs["seq_len"]))
     adalora = run_config.get("adalora-total-step", -1)
     kwargs["adalora_total_step"] = None if adalora is None or adalora < 0 else adalora
     return get_default_configs(**kwargs)
@@ -75,6 +78,27 @@ def seed_everything(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def client_identity(node_config: Mapping) -> Tuple[int, Optional[str]]:
+    """(partition id or -1, site id or None). Lab SuperNodes have both; plant SuperNodes (site kits,
+    SITE_NETWORK_PLAN.md §7) only `site`: no fixed partition ids in deployment."""
+    pid = node_config.get("partition-id")
+    site = node_config.get("site")
+    return (int(pid) if pid is not None else -1), (str(site) if site else None)
+
+
+def client_label(node_config: Mapping) -> str:
+    pid, site = client_identity(node_config)
+    return site or f"client{pid}"
+
+
+def client_seed(base: int, node_config: Mapping) -> int:
+    """Per-client seed: base + partition id in the lab, a stable hash of the site id for plants."""
+    pid, site = client_identity(node_config)
+    if pid >= 0:
+        return int(base) + pid
+    return int(base) + zlib.crc32((site or "").encode()) % 100_000
 
 
 def site_names(run_config: Mapping) -> list[str]:

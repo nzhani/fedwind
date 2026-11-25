@@ -39,7 +39,7 @@ def utc_now() -> str:
 
 def new_run_id(config: ExperimentConfig) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{config.energy_type}-{config.strategy.value}-h{config.horizon}-{stamp}"
+    return f"{config.energy_type.value}-{config.strategy.value}-h{config.horizon}-{stamp}"
 
 
 def run_dir(settings: Settings, run_id: str) -> Optional[Path]:

@@ -1,0 +1,26 @@
+# Plant-side tunnel: the SuperNode can't present a client certificate (flwr 1.25 has only
+# --root-certificates), so it talks TLS to this local proxy, which re-originates the connection
+# to the central gateway with the plant's client certificate.
+server {
+    listen 9092 ssl;
+    http2 on;
+    access_log /dev/stdout;
+
+    ssl_certificate      /pki/tunnel.crt;   # local listener, trusted by the SuperNode via the plant's local CA
+    ssl_certificate_key  /pki/tunnel.key;
+    ssl_protocols        TLSv1.3;
+    client_max_body_size 1g;
+
+    location / {
+        grpc_pass                    grpcs://${GATEWAY_HOST}:443;
+        grpc_ssl_certificate         /pki/client.crt;   # this plant's certificate
+        grpc_ssl_certificate_key     /pki/client.key;
+        grpc_ssl_trusted_certificate /pki/web-ca.crt;   # public CA of the gateway
+        grpc_ssl_verify              on;
+        grpc_ssl_name                ${GATEWAY_HOST};
+        grpc_ssl_server_name         on;
+        grpc_ssl_protocols           TLSv1.3;
+        grpc_read_timeout            900s;
+        grpc_send_timeout            900s;
+    }
+}

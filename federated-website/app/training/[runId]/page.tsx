@@ -9,15 +9,23 @@ import { useCallback, useEffect, useState } from "react"
 import { ArrowLeft, Award, CircleStop, Clock, Network, Upload } from "lucide-react"
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 import { PageLayout } from "@/components/page-layout"
+import { Pill, TextAction } from "@/components/fw/button"
+import { Notice } from "@/components/fw/feedback"
+import { RunPill, StatusPill } from "@/components/fw/status"
+import { useAuth } from "@/lib/auth"
 import { ApiErrorNotice, ErrorNotice, RunStatusBadge, formatDuration, formatTimestamp } from "@/components/platform"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
+  ENERGY_TYPES,
+  displayUnit,
+  runEnergyType,
   formatBytes,
   getRun,
   promoteModel,
+  listModels,
   stopRun,
   type RegisteredModel,
   type RunDetail,
@@ -42,16 +50,20 @@ function Stat({ icon: Icon, label, value }: { icon: typeof Clock; label: string;
 const fmt = (v: number | null | undefined, digits = 3) => (v == null ? "—" : v.toFixed(digits))
 
 export default function RunPage() {
+  const { isAdmin } = useAuth()
   const { runId } = useParams<{ runId: string }>()
   const [run, setRun] = useState<RunDetail | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [promoted, setPromoted] = useState<RegisteredModel | null>(null)
+  const [serving, setServing] = useState<RegisteredModel | null>(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
-      setRun(await getRun(runId))
+      const [r, models] = await Promise.all([getRun(runId), listModels().catch(() => [] as RegisteredModel[])])
+      setRun(r)
+      setServing(models.find((m) => m.run_id === runId) ?? null)
       setError(null)
     } catch (err) {
       setError(err)
@@ -99,12 +111,15 @@ export default function RunPage() {
   const siteRows = (run?.sites ?? []).map((site) => ({ site, ...run?.clients.find((c) => c.site === site) }))
   const realMetrics = run?.result?.metrics?.real
   const perSite = run?.result?.metrics?.per_site
+  const energy = runEnergyType(run?.config)
+  const energyInfo = ENERGY_TYPES.find((e) => e.value === energy)!
+  const unit = displayUnit(last?.val_real?.unit ?? run?.result?.unit) || energyInfo.unit
 
   return (
     <PageLayout>
-      <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 space-y-6">
-        <Link href="/training" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-4 w-4" />
+      <section className="mx-auto max-w-[1280px] px-5 pb-24 pt-8 sm:px-10 space-y-6">
+        <Link href="/training" className="inline-flex items-center gap-1.5 text-sm font-medium text-fw-muted hover:text-ink">
+          <ArrowLeft className="h-4 w-4" strokeWidth={1.75} />
           All runs
         </Link>
 
@@ -114,45 +129,45 @@ export default function RunPage() {
         {run && (
           <>
             <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="space-y-2">
-                <div className="flex items-center gap-3">
-                  <h1 className="font-mono text-lg font-semibold break-all">{run.run_id}</h1>
-                  <RunStatusBadge status={run.status} />
+              <div className="space-y-3">
+                <div className="fw-label">Training run</div>
+                <h1 className="fw-num break-all text-[28px] leading-[1.15] tracking-[-0.02em] sm:text-[36px]">{run.run_id}</h1>
+                <div className="flex flex-wrap items-center gap-2">
+                  <RunPill status={run.status} />
+                  {serving && (
+                    <StatusPill tone="accent" title={`Promoted ${formatTimestamp(serving.promoted_at)}${serving.promoted_by ? ` by ${serving.promoted_by}` : ""}`}>
+                      Currently serving {serving.horizon} h {serving.energy_type} forecasts
+                    </StatusPill>
+                  )}
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  {run.strategy.toUpperCase()} · horizon {run.horizon} h · {run.sites.length} sites · created{" "}
+                  {energyInfo.label} · {run.strategy.toUpperCase()} · horizon {run.horizon} h · {run.sites.length} sites · created{" "}
                   {formatTimestamp(run.created_at)}
                   {run.finished_at && <> · finished {formatTimestamp(run.finished_at)}</>}
                 </p>
               </div>
               <div className="flex gap-2">
-                {active && (
-                  <Button variant="outline" className="gap-2" disabled={busy} onClick={() => act(() => stopRun(run.run_id))}>
-                    <CircleStop className="h-4 w-4" />
+                {active && isAdmin && (
+                  <Pill variant="danger" icon={<CircleStop className="h-4 w-4" />} disabled={busy} onClick={() => act(() => stopRun(run.run_id))}>
                     Stop run
-                  </Button>
+                  </Pill>
                 )}
-                {run.status === "done" && (
-                  <Button
-                    className="gap-2"
-                    disabled={busy}
-                    onClick={() => act(async () => setPromoted(await promoteModel(run.run_id)))}
-                  >
-                    <Award className="h-4 w-4" />
+                {run.status === "done" && isAdmin && !serving && (
+                  <Pill icon={<Award className="h-4 w-4" />} loading={busy} onClick={() => act(async () => setPromoted(await promoteModel(run.run_id)))}>
                     Use for forecasts
-                  </Button>
+                  </Pill>
                 )}
               </div>
             </div>
 
             {run.error && <ErrorNotice title={`Run ${run.status}`} message={run.error} />}
             {promoted && (
-              <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800">
-                This run is now the global model for {promoted.horizon} h forecasts.{" "}
-                <Link href="/forecast" className="font-medium underline">
-                  Open Forecast
-                </Link>
-              </div>
+              <Notice
+                title={`This run now serves every ${promoted.energy_type} forecast ${promoted.horizon} h ahead`}
+                action={<TextAction href={`/forecast?energy=${promoted.energy_type}&horizon=${promoted.horizon}`}>Open forecast</TextAction>}
+              >
+                Plants and lab sites switch to it on their next forecast.
+              </Notice>
             )}
 
             <Card>
@@ -179,7 +194,9 @@ export default function RunPage() {
                 <CardHeader>
                   <CardTitle>Validation error per round</CardTitle>
                   <CardDescription>
-                    {hasReal ? "MAE in m/s (real units) and on normalized values." : "On normalized values."}
+                    {hasReal
+                      ? `MAE in ${unit} (real units${energy === "solar" ? ", daylight hours" : ""}) and on normalized values.`
+                      : "On normalized values."}
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -192,7 +209,7 @@ export default function RunPage() {
                           <YAxis tick={{ fontSize: 11 }} />
                           <Tooltip formatter={(v: number) => v.toFixed(4)} />
                           <Legend />
-                          {hasReal && <Line type="monotone" dataKey="real_mae" name="MAE (m/s)" stroke="#A23B72" strokeWidth={2} dot={history.length < 30} />}
+                          {hasReal && <Line type="monotone" dataKey="real_mae" name={`MAE (${unit})`} stroke="#A23B72" strokeWidth={2} dot={history.length < 30} />}
                           <Line type="monotone" dataKey="val_mae" name="MAE (normalized)" stroke="#2E86AB" strokeWidth={2} dot={history.length < 30} />
                           <Line type="monotone" dataKey="val_rmse" name="RMSE (normalized)" stroke="#F18F01" strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
                         </LineChart>
@@ -246,7 +263,11 @@ export default function RunPage() {
               <Card>
                 <CardHeader>
                   <CardTitle>Final result</CardTitle>
-                  <CardDescription>Test-split metrics of the best round, written by the server.</CardDescription>
+                  <CardDescription>
+                    Test-split metrics of the best round, written by the server, in {unit}
+                    {energy === "solar" ? " (daylight hours unless marked “all hours”)" : ""}.
+                    {run.result.metrics?.reference ? ` Skill reference: ${run.result.metrics.reference}.` : ""}
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   {realMetrics && (

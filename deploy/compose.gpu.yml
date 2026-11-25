@@ -16,3 +16,13 @@ services:
     deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_TARAZ:-0}"] }] } } }
   client-aktobe:
     deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_AKTOBE:-0}"] }] } } }
+  client-konaev:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_KONAEV:-0}"] }] } } }
+  client-shymkent:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_SHYMKENT:-0}"] }] } } }
+  client-kyzylorda:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_KYZYLORDA:-0}"] }] } } }
+  client-saran:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_SARAN:-0}"] }] } } }
+  client-turkistan:
+    deploy: { resources: { reservations: { devices: [{ <<: *gpu, device_ids: ["${GPU_TURKISTAN:-0}"] }] } } }

@@ -35,21 +35,199 @@ class EnergyType(str, Enum):
 # Sites
 # ---------------------------------------------------------------------------
 
+# Lifecycle (SITE_NETWORK_PLAN.md §4); "coming_soon"/"inactive" only appear in the sites.json fallback
+SiteStatus = Literal["registered", "approved", "rejected", "active", "suspended", "revoked", "coming_soon", "inactive"]
+
+# Kazakhstan, with a small margin (lat 40.57-55.44, lon 46.49-87.31)
+KZ_LAT = (40.5, 55.5)
+KZ_LON = (46.4, 87.4)
+KZ_TIMEZONES = ("Asia/Almaty", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Aqtobe", "Asia/Aqtau", "Asia/Atyrau", "Asia/Oral")
+DATA_SOURCES = ("csv", "opc-ua", "pi", "other")
+
+
 class Site(BaseModel):
+    """Public view of a site (no contact, owner or consents)."""
+
     id: str
     name: str
     energy_type: EnergyType
+    kind: Literal["builtin", "plant"] = "builtin"
     partition_id: Optional[int] = None
     lat: float
     lon: float
     timezone: str
     capacity_kw: Optional[float] = None
-    status: Literal["active", "coming_soon", "inactive"]
+    status: SiteStatus
     coordinates_source: Optional[str] = None
+    # Takes part in federated training runs: lab sites with a SuperNode today; plants once their
+    # Flower connection is registered (SITE_NETWORK_PLAN.md M6)
+    can_train: bool = False
+    train_note: Optional[str] = None   # why it can't train now (plants: SITE_NETWORK_PLAN.md §7.2)
+    forecast_public: bool = True  # anyone may see its forecasts (plants: the public_forecasts consent)
 
 
 class SiteListResponse(BaseModel):
     sites: List[Site]
+
+
+class WindEquipment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    turbine_model: str = Field(min_length=1, max_length=100)
+    turbine_count: int = Field(ge=1, le=1000)
+    hub_height_m: float = Field(ge=10, le=250)
+    rated_power_kw: Optional[float] = Field(None, gt=0, le=20000)  # per turbine
+
+
+class SolarEquipment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    module_type: str = Field(min_length=1, max_length=100)
+    tilt_deg: float = Field(ge=0, le=90)
+    azimuth_deg: float = Field(180, ge=0, lt=360)  # 180 = facing south
+    tracking: Literal["fixed", "single-axis", "dual-axis"] = "fixed"
+
+
+class SiteConsents(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    train: Literal[True]                 # required: the site joins federated training
+    share_forecast_window: bool = False  # central forecasting from a short recent window (NFR-01 exception)
+    public_forecasts: bool = False       # show this site's forecasts to viewers
+
+
+class SiteRegistration(BaseModel):
+    """What an operator submits for a new site (and may edit while it waits for approval)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=2, max_length=100)
+    energy_type: EnergyType
+    lat: float = Field(ge=KZ_LAT[0], le=KZ_LAT[1], description="Latitude inside Kazakhstan")
+    lon: float = Field(ge=KZ_LON[0], le=KZ_LON[1], description="Longitude inside Kazakhstan")
+    timezone: str = "Asia/Almaty"
+    capacity_kw: float = Field(gt=0, le=5_000_000)
+    equipment: Dict[str, Any]
+    data_source: Literal["csv", "opc-ua", "pi", "other"] = "csv"
+    contact: str = Field(min_length=3, max_length=200)
+    consents: SiteConsents
+
+    @model_validator(mode="after")
+    def _check(self) -> "SiteRegistration":
+        if self.timezone not in KZ_TIMEZONES:
+            raise ValueError(f"timezone must be one of {list(KZ_TIMEZONES)}")
+        model = SolarEquipment if self.energy_type == EnergyType.SOLAR else WindEquipment
+        self.equipment = model(**self.equipment).model_dump()
+        self.name = self.name.strip()
+        return self
+
+
+class SiteHistoryEntry(BaseModel):
+    at: str
+    action: str
+    actor: Optional[str] = None
+    note: Optional[str] = None
+
+
+class SiteConnection(BaseModel):
+    """What the site agent last reported (lab sites have no agent: state "lab")."""
+
+    state: Literal["lab", "never", "online", "offline"]
+    last_heartbeat_at: Optional[str] = None
+    agent_kind: Optional[Literal["kit", "simulated"]] = None
+    agent_version: Optional[str] = None
+    last_data_hour: Optional[str] = None
+    rows_today: Optional[int] = None
+    gaps_today: Optional[int] = None
+    heartbeat_s: int = 30
+    train_hours: Optional[int] = None    # hours in the plant's training store (agent 0.2+)
+    quality_7d: List[Dict[str, Any]] = Field(default_factory=list)  # [{day, rows, gaps, flagged, curtailed}]
+
+
+class SiteProgress(BaseModel):
+    registered_at: Optional[str] = None
+    approved_at: Optional[str] = None
+    enrolled_at: Optional[str] = None
+    online_at: Optional[str] = None
+
+
+class SiteKitState(BaseModel):
+    can_download: bool = False
+    installed: bool = False
+    token_expires_at: Optional[str] = None  # newest unused kit token
+
+
+class SiteDetail(Site):
+    """Full view for the owning organization and admins."""
+
+    org_id: Optional[int] = None
+    org_name: Optional[str] = None
+    equipment: Dict[str, Any] = Field(default_factory=dict)
+    data_source: Optional[str] = None
+    contact: Optional[str] = None
+    consents: Dict[str, Any] = Field(default_factory=dict)
+    decision_note: Optional[str] = None
+    created_at: Optional[str] = None
+    decided_at: Optional[str] = None
+    history: List[SiteHistoryEntry] = Field(default_factory=list)
+    connection: Optional[SiteConnection] = None
+    progress: Optional[SiteProgress] = None
+    kit: Optional[SiteKitState] = None
+
+
+class SiteDetailListResponse(BaseModel):
+    sites: List[SiteDetail]
+
+
+class SiteDecision(BaseModel):
+    note: Optional[str] = Field(None, max_length=1000)
+
+
+# ---------------------------------------------------------------------------
+# Site API: what site agents send (DEMO_SIMULATION_PLAN.md §2.2)
+# ---------------------------------------------------------------------------
+
+class AgentInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["kit", "simulated"] = "kit"
+    version: str = Field("0.0.0", max_length=40)
+
+
+class EnrollRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=10, max_length=200)
+    agent: AgentInfo = Field(default_factory=AgentInfo)
+    # Made at the plant; the private keys never leave it (SITE_NETWORK_PLAN.md §2.3)
+    csr: Optional[str] = Field(None, max_length=10000)                # PEM, CN = site id
+    flower_public_key: Optional[str] = Field(None, max_length=1000)  # OpenSSH EC key, registered with Flower
+
+
+class HeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_kind: Literal["kit", "simulated"] = "kit"
+    agent_version: str = Field("0.0.0", max_length=40)
+    last_data_hour: Optional[str] = None  # ISO UTC
+    rows_today: Optional[int] = Field(None, ge=0, le=100000)
+    gaps_today: Optional[int] = Field(None, ge=0, le=100000)
+    disk_free_gb: Optional[float] = Field(None, ge=0)
+    gpu: Optional[str] = Field(None, max_length=100)
+    train_hours: Optional[int] = Field(None, ge=0, le=10_000_000)   # size of the plant's training store
+
+
+class ForecastInputRequest(BaseModel):
+    """The newest hours of the forecast variable (wind speed m/s, or GHI W/m2), oldest first.
+    Only from sites that consented to central forecasting (SITE_NETWORK_PLAN.md §8).
+    Wind height: real plants send hub height (data contract); simulated plants send NASA's 50 m."""
+
+    model_config = ConfigDict(extra="forbid")
+    end_hour: str                                                # ISO UTC hour of the last value
+    values: List[Optional[float]] = Field(min_length=1, max_length=720)
+
+
+class QualityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    day: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    rows: int = Field(ge=0, le=100000)
+    gaps: int = Field(ge=0, le=100000)
+    flagged: int = Field(0, ge=0, le=100000)
+    curtailed: int = Field(0, ge=0, le=100000)
 
 
 # ---------------------------------------------------------------------------
@@ -69,10 +247,14 @@ class ExperimentConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    energy_type: Literal["wind"] = "wind"
-    dataset: str = "kzmet"
+    energy_type: EnergyType = EnergyType.WIND
+    dataset: Optional[str] = None  # default: kzmet (wind) / kzsolar (solar)
     data_source: Literal["builtin", "upload"] = "builtin"
-    sites: List[str] = Field(default_factory=lambda: ["almaty", "zhezkazgan", "aktau", "taraz", "aktobe"])
+    sites: Optional[List[str]] = None  # default: every active site of the energy type
+    # Solar only (my_flower_app/solar.py): forecast the clear-sky index k* (converted back to
+    # GHI) or GHI directly; leave night and low-sun hours out of the training loss.
+    solar_target: Literal["kstar", "ghi"] = "kstar"
+    daylight_mask: bool = True
     mode: Literal["federated"] = "federated"
     engine: Literal["deployment"] = "deployment"
     strategy: Strategy = Strategy.FEDAVG
@@ -106,10 +288,13 @@ class ExperimentConfig(BaseModel):
             raise ValueError(f"horizon must be one of {list(HORIZONS)}")
         if self.model not in MODELS:
             raise ValueError(f"model must be one of {list(MODELS)}")
-        if len(set(self.sites)) != len(self.sites) or not self.sites:
-            raise ValueError("sites must be a non-empty list without duplicates")
-        if self.min_train_clients > len(self.sites):
-            raise ValueError("min_train_clients cannot exceed the number of sites")
+        if self.sites is not None:
+            if len(set(self.sites)) != len(self.sites) or not self.sites:
+                raise ValueError("sites must be a non-empty list without duplicates")
+            if self.min_train_clients > len(self.sites):
+                raise ValueError("min_train_clients cannot exceed the number of sites")
+        if self.dataset is None:
+            self.dataset = "kzsolar" if self.energy_type == EnergyType.SOLAR else "kzmet"
         return self
 
 
@@ -195,6 +380,11 @@ class RegisteredModel(BaseModel):
     run_id: str
     promoted_at: str
     metrics: Optional[Dict[str, Any]] = None
+    # For the model card on forecasts (absent in records promoted before 2026-11-20)
+    sites: List[str] = Field(default_factory=list)
+    rounds_completed: Optional[int] = None
+    strategy: Optional[str] = None
+    promoted_by: Optional[str] = None
 
 
 class ModelListResponse(BaseModel):
@@ -205,15 +395,35 @@ class ModelListResponse(BaseModel):
 # Forecast  (plan §5.7)
 # ---------------------------------------------------------------------------
 
-class WindPoint(BaseModel):
+class ForecastPoint(BaseModel):
+    """Wind: wind_speed (m/s) + wind_power_kw. Solar: ghi + clear_sky_ghi (W/m2) + pv_power_kw."""
+
     timestamp: str
-    wind_speed: float
+    wind_speed: Optional[float] = None
     wind_power_kw: Optional[float] = None
+    ghi: Optional[float] = None
+    clear_sky_ghi: Optional[float] = None
+    pv_power_kw: Optional[float] = None
+    # Filled for both energy types, so pages can lead with power
+    power_kw: Optional[float] = None
+    capacity_factor: Optional[float] = None  # power / capacity, 0-1
 
 
 class ForecastModelRef(BaseModel):
+    """The newest promoted global model that produced the forecast."""
+
     run_id: str
     kind: Literal["global"] = "global"
+    energy_type: Optional[EnergyType] = None
+    horizon: Optional[int] = None
+    promoted_at: Optional[str] = None
+    promoted_by: Optional[str] = None
+    sites: List[str] = Field(default_factory=list)
+    rounds_completed: Optional[int] = None
+    strategy: Optional[str] = None
+    skill_vs_persistence: Optional[float] = None
+    skill_reference: Optional[str] = None
+    data_percent: Optional[float] = None  # < 100: a small demo run, labelled as such
 
 
 class ForecastResponse(BaseModel):
@@ -223,5 +433,10 @@ class ForecastResponse(BaseModel):
     unit: str = "m/s"
     as_of: str
     model: ForecastModelRef
-    actual: List[WindPoint]
-    forecast: List[WindPoint]
+    actual: List[ForecastPoint]
+    forecast: List[ForecastPoint]
+    capacity_kw: Optional[float] = None
+    # "plant": the site's registered capacity; "reference": a 2 MW turbine / 1 MW PV stand-in (lab sites)
+    power_basis: Literal["plant", "reference"] = "reference"
+    source: Literal["site_inference", "central"] = "site_inference"
+    simulated: bool = False

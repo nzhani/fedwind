@@ -28,6 +28,7 @@ class Settings:
     sites_seed: Path
     federation_address: Optional[str]
     inference_url_template: Optional[str]
+    inference_central_url: Optional[str] = None  # central forecasting service (plants)
 
     @property
     def runs_dir(self) -> Path:
@@ -48,4 +49,5 @@ def get_settings() -> Settings:
         sites_seed=Path(os.environ.get("FEDWIND_SITES_SEED", _REPO_ROOT / "deploy" / "seed" / "sites.json")),
         federation_address=os.environ.get("FEDERATION_ADDRESS") or None,
         inference_url_template=os.environ.get("INFERENCE_URL_TEMPLATE") or None,
+        inference_central_url=os.environ.get("INFERENCE_CENTRAL_URL") or None,
     )

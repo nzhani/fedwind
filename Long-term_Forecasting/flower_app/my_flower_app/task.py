@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset, ConcatDataset
 from my_flower_app.dataloader import Dataset_Custom
+from my_flower_app.solar import SolarDataset, masked_mse, AUX_DAYLIGHT
 import torch.nn as nn
 from torch.utils.data import random_split
 
@@ -42,6 +43,21 @@ DATASET_REGISTRY = {
             2: "Aktau",
             3: "Taraz",
             4: "Aktobe",
+        },
+    },
+    # Solar (GHI, W/m2): target is "KSTAR" or "GHI" depending on the run's solar-target;
+    # deploy/data/sites/<site>/ holds the deployment copies (download_kzmet.py --energy solar).
+    "KZSOLAR": {
+        "folder": "datasets/solar",
+        "files": ["nasa_konaev.csv", "nasa_shymkent.csv", "nasa_kyzylorda.csv", "nasa_saran.csv", "nasa_turkistan.csv"],
+        "target": "KSTAR",
+        "num_clients": 5,
+        "client_names": {
+            0: "Konaev",
+            1: "Shymkent",
+            2: "Kyzylorda",
+            3: "Saran",
+            4: "Turkistan",
         },
     },
     "GREECE": {
@@ -359,7 +375,30 @@ def trainable_state_dict(model):
     return filtered
 
 
-def train(net, trainloader, epochs, lr, device, valloader=None, weight_decay=0.01, global_weights=None, proximal_mu=None, c_local=None, c_global=None):
+def _unpack(batch, device):
+    """(x, y, x_mark, y_mark, aux) from a dict or tuple batch; aux is the solar auxiliary array or None."""
+    x_mark = y_mark = aux = None
+    if isinstance(batch, dict):
+        x, y_true = batch["x"], batch["y"]
+        x_mark, y_mark, aux = batch.get("x_mark"), batch.get("y_mark"), batch.get("aux")
+    elif len(batch) >= 4:
+        x, y_true, x_mark, y_mark = batch[:4]
+        if len(batch) >= 5:
+            aux = batch[4]
+    else:
+        x, y_true = batch[:2]
+    x = x.to(device).float()
+    y_true = y_true.to(device).float()
+    if x_mark is not None:
+        x_mark = x_mark.to(device).float()
+    if y_mark is not None:
+        y_mark = y_mark.to(device).float()
+    if aux is not None:
+        aux = aux.to(device).float()
+    return x, y_true, x_mark, y_mark, aux
+
+
+def train(net, trainloader, epochs, lr, device, valloader=None, weight_decay=0.01, global_weights=None, proximal_mu=None, c_local=None, c_global=None, masked_loss=False):
     """
     Train loop expects `net` to be an instance of Net (wrapper above).
     trainloader yields dicts {"x": [B, seq_len, 1], "y": [B, pred_len, 1]}
@@ -377,6 +416,7 @@ def train(net, trainloader, epochs, lr, device, valloader=None, weight_decay=0.0
         proximal_mu: FedProx proximal term coefficient (optional, e.g., 0.01)
         c_local: local control variate for SCAFFOLD
         c_global: global control variate for SCAFFOLD
+        masked_loss: solar only; the loss counts daylight target hours only (batches carry aux)
     """
     net.to(device)
     trainable_params = [p for p in net.parameters() if p.requires_grad]
@@ -420,24 +460,7 @@ def train(net, trainloader, epochs, lr, device, valloader=None, weight_decay=0.0
         # Training phase
         net.train()
         for batch in trainloader:
-            x_mark = None
-            y_mark = None
-            if isinstance(batch, dict):
-                x = batch["x"].to(device).float()
-                y_true = batch["y"].to(device).float()
-                x_mark = batch.get("x_mark", None)
-                y_mark = batch.get("y_mark", None)
-            else:
-                if len(batch) >= 4:
-                    x, y_true, x_mark, y_mark = batch[:4]
-                else:
-                    x, y_true = batch[:2]
-                x = x.to(device).float()
-                y_true = y_true.to(device).float()
-                if x_mark is not None:
-                    x_mark = x_mark.to(device).float()
-                if y_mark is not None:
-                    y_mark = y_mark.to(device).float()
+            x, y_true, x_mark, y_mark, aux = _unpack(batch, device)
 
             optimizer.zero_grad()
             y_pred = net(x, x_mark=x_mark, y=y_true, y_mark=y_mark)
@@ -446,8 +469,11 @@ def train(net, trainloader, epochs, lr, device, valloader=None, weight_decay=0.0
             if y_true.size(1) > pred_len:
                 y_true = y_true[:, -pred_len:, :]
 
-            # Base loss (MSE)
-            mse_loss = criterion(y_pred, y_true)
+            # Base loss (MSE); solar: daylight target hours only
+            if masked_loss and aux is not None:
+                mse_loss = masked_mse(y_pred, y_true, aux[..., AUX_DAYLIGHT:AUX_DAYLIGHT + 1])
+            else:
+                mse_loss = criterion(y_pred, y_true)
             total_batch_loss = mse_loss
 
             # CRITICAL: Add FedProx proximal term: (mu/2) * ||w - w_global||^2
@@ -499,7 +525,7 @@ def train(net, trainloader, epochs, lr, device, valloader=None, weight_decay=0.0
         if valloader is not None:
             # Reusing the existing test function for validation
             # Note: test() sets net.eval(), so we ensure to set net.train() back at start of loop
-            val_loss, val_mae, val_rmse = test(net, valloader, device, return_predictions=False)
+            val_loss, val_mae, val_rmse = test(net, valloader, device, return_predictions=False, masked_loss=masked_loss)
             metrics["val_loss"] = val_loss
             metrics["val_mae"] = val_mae
             metrics["val_rmse"] = val_rmse
@@ -531,10 +557,12 @@ def train(net, trainloader, epochs, lr, device, valloader=None, weight_decay=0.0
     logging.info(f"Training completed over {epochs} epochs. Average MSE: {avg_mse_loss:.6f}")
     return avg_mse_loss, history, new_c_local
 
-def test(net, testloader, device, return_predictions=False):
+def test(net, testloader, device, return_predictions=False, masked_loss=False, return_aux=False):
     """
     Evaluate model on validation/test set.
-    Returns (avg_loss, mae, rmse) or (avg_loss, mae, rmse, predictions, trues) if return_predictions=True
+    Returns (avg_loss, mae, rmse) or (avg_loss, mae, rmse, predictions, trues) if return_predictions=True,
+    plus the stacked solar aux arrays when return_aux=True.
+    masked_loss: solar only; loss, MAE and RMSE over daylight target hours only.
     """
     net.to(device)
     net.eval()
@@ -544,33 +572,25 @@ def test(net, testloader, device, return_predictions=False):
     count = 0
     all_preds = []
     all_trues = []
+    all_aux = []
+    all_masks = []
 
     with torch.no_grad():
         for batch in testloader:
-            x_mark = None
-            y_mark = None
-            if isinstance(batch, dict):
-                x = batch["x"].to(device).float()
-                y_true = batch["y"].to(device).float()
-                x_mark = batch.get("x_mark", None)
-                y_mark = batch.get("y_mark", None)
-            else:
-                if len(batch) >= 4:
-                    x, y_true, x_mark, y_mark = batch[:4]
-                else:
-                    x, y_true = batch[:2]
-                x = x.to(device).float()
-                y_true = y_true.to(device).float()
-                if x_mark is not None:
-                    x_mark = x_mark.to(device).float()
-                if y_mark is not None:
-                    y_mark = y_mark.to(device).float()
+            x, y_true, x_mark, y_mark, aux = _unpack(batch, device)
 
             y_pred = net(x, x_mark=x_mark, y=y_true, y_mark=y_mark)
             pred_len = net.configs.pred_len
             if y_true.size(1) > pred_len:
                 y_true = y_true[:, -pred_len:, :]
-            loss = criterion(y_pred, y_true)
+            if masked_loss and aux is not None:
+                mask = aux[..., AUX_DAYLIGHT:AUX_DAYLIGHT + 1]
+                loss = masked_mse(y_pred, y_true, mask)
+                all_masks.append(mask.cpu().numpy())
+            else:
+                loss = criterion(y_pred, y_true)
+            if aux is not None:
+                all_aux.append(aux.cpu().numpy())
 
             # if count < 5:  # print only first 5 batches to avoid spam
             #     logging.info(f"[TEST] y_pred: {y_pred[0].detach().cpu().numpy().flatten()}")
@@ -586,15 +606,19 @@ def test(net, testloader, device, return_predictions=False):
 
     preds = np.concatenate(all_preds, axis=0) if all_preds else np.zeros((0,))
     trues = np.concatenate(all_trues, axis=0) if all_trues else np.zeros((0,))
-    if preds.size:
-        mae = float(np.mean(np.abs(preds - trues)))
-        rmse = float(np.sqrt(np.mean((preds - trues) ** 2)))
+    diff = preds - trues
+    if all_masks:
+        diff = diff[np.concatenate(all_masks, axis=0) > 0.5]
+    if diff.size:
+        mae = float(np.mean(np.abs(diff)))
+        rmse = float(np.sqrt(np.mean(diff ** 2)))
     else:
         mae = float("nan")
         rmse = float("nan")
 
+    aux_all = np.concatenate(all_aux, axis=0) if all_aux else None
     if return_predictions:
-        return avg_loss, mae, rmse, preds, trues
+        return (avg_loss, mae, rmse, preds, trues, aux_all) if return_aux else (avg_loss, mae, rmse, preds, trues)
     return avg_loss, mae, rmse
 
 
@@ -605,6 +629,7 @@ def _client_dataset(
     dataset_name: str,
     data_file: str = None,
     percent: int = 100,
+    solar: dict = None,
 ):
     """
     One client's split of its own data (70% train / 10% val / 20% test by time).
@@ -612,11 +637,28 @@ def _client_dataset(
     data_file: deployment mode, the only CSV this client may read (see
     experiment.client_data_file). None: simulation mode, the registry file for
     partition_id. The scaler is always fit on this client's own train split.
+    solar: solar.options(run_config) for solar runs (k* or GHI target, daylight mask), else None.
     """
     if cfg is None:
         raise ValueError("cfg must be provided. Use get_default_configs(pred_len=...) to create cfg.")
 
     ds_cfg = get_dataset_config(dataset_name)
+    if solar is not None:
+        if data_file:
+            root_path, data_path = os.path.split(data_file)
+        else:
+            root_path, data_path = os.path.join(project_root, ds_cfg["folder"]), ds_cfg["files"][partition_id]
+        dataset = SolarDataset(
+            root_path=root_path,
+            flag=flag,
+            size=(cfg.seq_len, getattr(cfg, "label_len", 48), cfg.pred_len),
+            data_path=data_path,
+            percent=percent,
+            **solar,
+        )
+        logging.info(f"Client {partition_id}: solar {flag} split of {data_path} ({solar['target_kind']}): "
+                     f"{len(dataset.data_x)} rows, {len(dataset)} samples")
+        return dataset
     if data_file:
         root_path, data_path = os.path.split(data_file)
         # Uploaded files may lack "nasa" in their name; force the NASA POWER parser.
@@ -649,9 +691,10 @@ def load_client_train(
     dataset_name: str = "VNMET",
     data_file: str = None,
     percent: int = 100,
+    solar: dict = None,
 ):
     """Client training loader. percent < 100 keeps only the first part of the train split (smoke tests)."""
-    full_train = _client_dataset("train", partition_id, cfg, dataset_name, data_file, percent)
+    full_train = _client_dataset("train", partition_id, cfg, dataset_name, data_file, percent, solar)
     logging.info(f"Client {partition_id}: Partition ID: {partition_id}, Num partitions: {num_partitions}")
     return DataLoader(full_train, batch_size=bs, shuffle=True, drop_last=False)
 
@@ -662,9 +705,10 @@ def load_client_val(
     cfg: SimpleNamespace = None,
     dataset_name: str = "VNMET",
     data_file: str = None,
+    solar: dict = None,
 ):
     """Client validation loader (10% of the client's data, after train)."""
-    val_dataset = _client_dataset("val", partition_id, cfg, dataset_name, data_file)
+    val_dataset = _client_dataset("val", partition_id, cfg, dataset_name, data_file, solar=solar)
     return DataLoader(val_dataset, batch_size=bs, shuffle=False, drop_last=False)
 
 
@@ -674,9 +718,10 @@ def load_client_test(
     cfg: SimpleNamespace = None,
     dataset_name: str = "VNMET",
     data_file: str = None,
+    solar: dict = None,
 ):
     """Client test loader (last 20% of the client's data)."""
-    test_dataset = _client_dataset("test", partition_id, cfg, dataset_name, data_file)
+    test_dataset = _client_dataset("test", partition_id, cfg, dataset_name, data_file, solar=solar)
     return DataLoader(test_dataset, batch_size=bs, shuffle=False, drop_last=False)
 
 

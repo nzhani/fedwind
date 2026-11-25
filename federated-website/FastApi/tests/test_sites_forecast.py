@@ -6,13 +6,41 @@ def test_sites_filtered_by_energy_type(client):
     wind = client.get("/api/sites", params={"energy_type": "wind"}).json()["sites"]
     assert [s["id"] for s in wind] == ["almaty", "zhezkazgan", "aktau", "taraz", "aktobe"]
     solar = client.get("/api/sites", params={"energy_type": "solar"}).json()["sites"]
-    assert solar and all(s["status"] == "coming_soon" for s in solar)
+    assert [s["id"] for s in solar] == ["konaev", "shymkent", "kyzylorda", "saran", "turkistan"]
+    assert all(s["status"] == "active" and s["capacity_kw"] == 1000 for s in solar)
+    # One federation: partition ids are unique across energy types
+    pids = [s["partition_id"] for s in wind + solar]
+    assert sorted(pids) == list(range(10))
     assert client.get("/api/sites", params={"energy_type": "hydro"}).status_code == 422
 
 
-def test_forecast_solar_is_501(client):
-    r = client.get("/api/forecast", params={"energy_type": "solar", "site": "almaty-solar", "horizon": 72})
-    assert r.status_code == 501
+def test_solar_forecast_needs_a_solar_site_and_a_solar_model(client, data_dir):
+    # A wind site isn't a solar site, and a promoted wind model doesn't serve solar
+    assert client.get("/api/forecast", params={"energy_type": "solar", "site": "almaty", "horizon": 72}).status_code == 422
+    write_finished_run(data_dir)
+    client.post("/api/models/promote", json={"run_id": "wind-fedavg-h72-20261101T000000Z"})
+    r = client.get("/api/forecast", params={"energy_type": "solar", "site": "konaev", "horizon": 72})
+    assert r.status_code == 503 and "solar horizon 72" in r.json()["detail"]
+
+
+def test_solar_forecast_through_inference(client, data_dir):
+    from main import app
+
+    run_id = "solar-fedavg-h72-20261101T000000Z"
+    write_finished_run(data_dir, run_id=run_id, energy_type="solar")
+    r = client.post("/api/models/promote", json={"run_id": run_id})
+    assert r.status_code == 200 and r.json()["energy_type"] == "solar"
+    assert (data_dir / "models" / "solar" / "h72" / "current.pt").is_file()
+    fake = FakeInference()
+    app.dependency_overrides[get_inference] = lambda: fake
+
+    r = client.get("/api/forecast", params={"energy_type": "solar", "site": "saran", "horizon": 72})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["energy_type"] == "solar" and body["unit"] == "W/m2"
+    assert body["forecast"][1]["ghi"] == 100.0 and body["forecast"][1]["pv_power_kw"] == 80.0
+    assert body["forecast"][1]["wind_speed"] is None
+    assert fake.calls == [("saran", 72, None, "solar/h72/current.pt")]
 
 
 def test_forecast_validates_site_and_horizon(client):

@@ -1,0 +1,15 @@
+# Simulation-only addition to a site kit's docker-compose.yml (used by run_site.sh):
+# - lets the agent container reach the API published on this computer as host.docker.internal
+#   (Linux needs this line)
+# - runs the agent as your user, so the plant's folder (key, NASA cache) stays yours to delete
+# - no status-page port (several plants on one computer) and NASA history for training
+services:
+  agent:
+    user: "${SIM_UID:-1000}:${SIM_GID:-1000}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Several simulated plants share one computer: no status-page port on the host
+    ports: !reset []
+    environment:
+      # Two years of NASA POWER history plus this year, so the plant's SuperNode has something to train on
+      SIM_HISTORY_YEARS: ${SIM_HISTORY_YEARS:-2}

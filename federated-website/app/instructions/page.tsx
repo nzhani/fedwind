@@ -121,7 +121,7 @@ export default function InstructionsPage() {
           <div className="mx-auto max-w-3xl text-center">
             <SectionHeader
               badge="Getting Started"
-              title="How to Use FedWind"
+              title="How to Use ArqauQuat"
               description=""
               centered
             />
@@ -140,7 +140,7 @@ export default function InstructionsPage() {
           </CardHeader>
           <CardContent className="prose prose-sm max-w-none">
             <p className="text-muted-foreground leading-relaxed">
-              FedWind allows wind farm operators and researchers to participate in collaborative wind forecasting 
+              ArqauQuat allows wind farm operators and researchers to participate in collaborative wind forecasting 
               <strong className="text-foreground"> without sharing their raw data</strong>. The system supports two primary modes of operation:
             </p>
             <div className="mt-6 grid gap-4 sm:grid-cols-2">

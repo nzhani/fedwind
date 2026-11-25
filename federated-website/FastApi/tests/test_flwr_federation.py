@@ -75,6 +75,19 @@ def test_to_run_config_maps_keys_and_sites():
     assert rc["data-percent"] == 100
 
 
+def test_to_run_config_solar():
+    cfg = ExperimentConfig(energy_type="solar", sites=["konaev", "saran"], horizon=72, min_train_clients=2).model_dump(mode="json")
+    rc = to_run_config(cfg, "run-2", "/data/runs", ["almaty", "zhezkazgan", "aktau", "taraz", "aktobe",
+                                                    "konaev", "shymkent", "kyzylorda", "saran", "turkistan"])
+    assert rc["energy-type"] == "solar" and rc["dataset-name"] == "KZSOLAR" and rc["target-column"] == "KSTAR"
+    assert rc["solar-target"] == "kstar" and rc["daylight-mask"] is True
+    assert rc["site-names"] == "konaev,saran" and rc["partition-sites"].endswith("saran,turkistan")
+    wind = to_run_config(ExperimentConfig(sites=["almaty"], min_train_clients=1).model_dump(mode="json"), "r", "/d", [])
+    assert wind["energy-type"] == "wind" and "solar-target" not in wind
+    with pytest.raises(ValueError):
+        to_run_config(ExperimentConfig().model_dump(mode="json"), "r", "/d", [])
+
+
 def test_run_config_toml_round_trips(tmp_path):
     rc = {"a": 1, "b": 0.5, "c": True, "d": 'x "quoted"', "e": ""}
     write_run_config_toml(tmp_path / "rc.toml", rc)
@@ -88,7 +101,7 @@ def test_start_status_state_stop(data_dir, fake_flwr, listener, tmp_path):
     status = fed.status()
     assert status.connected and status.connected_nodes == 2
 
-    cfg = ExperimentConfig(rounds=3)
+    cfg = ExperimentConfig(rounds=3, sites=["almaty", "aktau"], min_train_clients=2)
     folder = run_store.create_run(settings, "wind-fedavg-h72-x", cfg)
     assert fed.start_run("wind-fedavg-h72-x", folder / "config.yaml") == "4242"
     rc = tomllib.loads((folder / "run_config.toml").read_text())

@@ -44,7 +44,7 @@ def list_models(settings: Settings) -> List[RegisteredModel]:
     return models
 
 
-def promote(settings: Settings, run: RunDetail) -> RegisteredModel:
+def promote(settings: Settings, run: RunDetail, promoted_by: Optional[str] = None) -> RegisteredModel:
     if run.status != "done" or not run.result:
         raise PromoteError(f"Run '{run.run_id}' is {run.status}; only finished runs can be promoted")
 
@@ -69,6 +69,10 @@ def promote(settings: Settings, run: RunDetail) -> RegisteredModel:
         run_id=run.run_id,
         promoted_at=utc_now(),
         metrics=run.result.get("metrics"),
+        sites=list(run.sites),
+        rounds_completed=run.result.get("rounds_completed") or run.current_round or None,
+        strategy=run.strategy,
+        promoted_by=promoted_by,
     )
     with open(target_dir / "current.json", "w", encoding="utf-8") as f:
         json.dump(model.model_dump(mode="json"), f, indent=2)

@@ -56,6 +56,31 @@ def test_start_run_then_409_then_stop(client, data_dir):
     assert _start(client).status_code == 201
 
 
+def test_solar_run_uses_solar_sites_and_settings(client, data_dir):
+    import yaml
+
+    fake = _connect()
+    r = _start(client, {"energy_type": "solar", "rounds": 2, "horizon": 72, "solar_target": "ghi", "daylight_mask": False})
+    assert r.status_code == 201, r.text
+    run = r.json()
+    assert run["run_id"].startswith("solar-fedavg-h72-")
+    assert run["sites"] == ["konaev", "shymkent", "kyzylorda", "saran", "turkistan"]
+    cfg = yaml.safe_load((data_dir / "runs" / run["run_id"] / "config.yaml").read_text())
+    assert cfg["energy_type"] == "solar" and cfg["dataset"] == "kzsolar"
+    assert cfg["solar_target"] == "ghi" and cfg["daylight_mask"] is False
+    assert fake.started == [run["run_id"]]
+
+
+def test_solar_run_rejects_wind_sites_and_uploads(client):
+    _connect()
+    r = _start(client, {"energy_type": "solar", "sites": ["konaev", "almaty"], "min_train_clients": 1})
+    assert r.status_code == 422 and "almaty" in r.json()["detail"]
+    r = _start(client, {"energy_type": "solar", "sites": ["konaev"], "min_train_clients": 1},
+               files={"file_konaev": ("k.csv", b"x", "text/csv")})
+    assert r.status_code == 422 and "wind runs only" in r.json()["detail"]
+    assert _start(client, {"energy_type": "solar", "solar_target": "dni"}).status_code == 422
+
+
 def test_too_few_clients_is_503(client):
     _connect(FakeFederation(nodes=2))
     r = _start(client, {"min_train_clients": 4})

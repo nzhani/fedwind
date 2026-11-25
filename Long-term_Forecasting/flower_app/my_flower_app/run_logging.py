@@ -66,8 +66,20 @@ class RunLogger:
             return None
         return cls(runs_dir, run_id, run_config, partition_sites, selected)
 
-    def site(self, pid: int) -> str:
-        pid = int(pid)
+    @property
+    def solar(self) -> bool:
+        return str(self.run_config.get("energy-type", "wind")).lower() == "solar"
+
+    @property
+    def unit(self) -> str:
+        return "W/m2" if self.solar else "m/s"
+
+    def site(self, key) -> str:
+        """Clients are keyed by site id (plants, and lab clients since M6) or, from older clients,
+        by partition id."""
+        if isinstance(key, str):
+            return key
+        pid = int(key)
         return self.partition_sites[pid] if 0 <= pid < len(self.partition_sites) else f"client_{pid}"
 
     # -- per round -------------------------------------------------------------
@@ -81,10 +93,14 @@ class RunLogger:
         evaluate: Mapping[int, Mapping],
         uplink_bytes: Optional[int],
         downlink_bytes: Optional[int],
+        rejected: Optional[Mapping] = None,
     ) -> dict:
         clients = []
         replied_sites = set()
-        for pid, m in sorted(train.items()):
+        for key, reason in sorted((rejected or {}).items(), key=lambda kv: str(kv[0])):
+            replied_sites.add(self.site(key))
+            clients.append({"site": self.site(key), "status": "rejected", "reason": reason})
+        for pid, m in sorted(train.items(), key=lambda kv: str(kv[0])):
             site = self.site(pid)
             replied_sites.add(site)
             ev = evaluate.get(pid, {})
@@ -115,7 +131,7 @@ class RunLogger:
             "val_real": {
                 "mae": _mean(e.get("val_mae_real") for e in evs),
                 "rmse": _mean(e.get("val_rmse_real") for e in evs),
-                "unit": "m/s",
+                "unit": self.unit,
             },
             "clients": clients,
             "uplink_bytes": uplink_bytes,      # per client, trainable params only
@@ -152,10 +168,10 @@ class RunLogger:
         stopped_early: bool,
     ) -> dict:
         per_site = {}
-        for pid, e in sorted(best_eval.items()):
+        for pid, e in sorted(best_eval.items(), key=lambda kv: str(kv[0])):
             mae, rmse = _num(e.get("test_mae_real")), _num(e.get("test_rmse_real"))
             mean_obs, persist = _num(e.get("test_mean_real")), _num(e.get("persistence_mae_real"))
-            per_site[self.site(pid)] = {
+            site = {
                 "mae": mae,
                 "rmse": rmse,
                 "nmae": mae / mean_obs if mae is not None and mean_obs else None,
@@ -163,6 +179,21 @@ class RunLogger:
                 "persistence_mae": persist,
                 "skill_vs_persistence": 1 - mae / persist if mae is not None and persist else None,
             }
+            if self.solar:
+                # Daylight hours; reference = smart persistence, skill on RMSE (solar convention)
+                p_rmse, c_rmse = _num(e.get("persistence_rmse_real")), _num(e.get("climatology_rmse_real"))
+                site.update({
+                    "mbe": _num(e.get("test_mbe_real")),
+                    "mae_all_hours": _num(e.get("test_mae_all_real")),
+                    "rmse_all_hours": _num(e.get("test_rmse_all_real")),
+                    "persistence_rmse": p_rmse,
+                    "plain_persistence_mae": _num(e.get("plain_persistence_mae_real")),
+                    "climatology_mae": _num(e.get("climatology_mae_real")),
+                    "climatology_rmse": c_rmse,
+                    "skill_vs_persistence": 1 - rmse / p_rmse if rmse is not None and p_rmse else None,
+                    "skill_vs_climatology": 1 - rmse / c_rmse if rmse is not None and c_rmse else None,
+                })
+            per_site[self.site(pid)] = site
         evs = list(best_eval.values())
         sites = list(per_site.values())
         result = {
@@ -173,7 +204,8 @@ class RunLogger:
             "rounds_completed": rounds_done,
             "stopped_early": stopped_early,
             "horizon": int(self.run_config.get("pred-len", 0)),
-            "unit": "m/s",
+            "energy_type": "solar" if self.solar else "wind",
+            "unit": self.unit,
             "metrics": {
                 "normalized": {
                     "mae": _mean(e.get("test_mae") for e in evs),
@@ -186,8 +218,15 @@ class RunLogger:
                     "nmae": _mean(s["nmae"] for s in sites),
                     "nrmse": _mean(s["nrmse"] for s in sites),
                     "skill_vs_persistence": _mean(s["skill_vs_persistence"] for s in sites),
+                    **({
+                        "mbe": _mean(s["mbe"] for s in sites),
+                        "mae_all_hours": _mean(s["mae_all_hours"] for s in sites),
+                        "skill_vs_climatology": _mean(s["skill_vs_climatology"] for s in sites),
+                    } if self.solar else {}),
                 },
                 "per_site": per_site,
+                "reference": ("smart persistence (k* now x clear sky), RMSE skill, daylight hours" if self.solar
+                              else "persistence (last value), MAE skill"),
             },
             "model": {"checkpoint": "checkpoints/best.pt"},
             "timing": {"total_s": _num(total_s), "mean_round_s": _num(total_s / rounds_done) if rounds_done else None},

@@ -40,7 +40,7 @@ export function PageLayout({ children, className = "" }: PageLayoutProps) {
       animate="animate"
       exit="exit"
       variants={pageVariants}
-      className={className}
+      className={`pt-[72px] ${className}`}
     >
       {children}
     </motion.div>

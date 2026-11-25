@@ -6,11 +6,13 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
 from my_flower_app.task import Net, load_client_train, load_client_val, load_client_test, persistence_errors, train as train_fn, test as test_fn, trainable_state_dict
-from my_flower_app.experiment import build_model_configs, client_data_file, is_selected, seed_everything
+from my_flower_app.experiment import (build_model_configs, client_data_file, client_identity, client_label,
+                                      client_seed, is_selected, seed_everything)
+from my_flower_app.solar import evaluate_ghi, options as solar_options
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,12 +20,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 app = ClientApp()
 
 
-def _skip_reply(msg: Message, pid: int, keep_arrays: bool) -> Message:
+def _who(context: Context) -> ConfigRecord:
+    """Who replies: the server keys per-client metrics by site id (MetricRecord holds numbers only).
+    Flower's strategies count Array- and MetricRecords only, so this extra record is safe."""
+    _, site = client_identity(context.node_config)
+    return ConfigRecord({"site": site or ""})
+
+
+def _skip_reply(msg: Message, pid: int, keep_arrays: bool, context: Context) -> Message:
     """
     Reply of a client whose site isn't selected for this run: weight 0, so it
     changes nothing in the weighted average; `skipped` lets the server leave it out.
     """
-    content = {"metrics": MetricRecord({"num-examples": 0, "partition-id": pid, "skipped": 1})}
+    content = {"metrics": MetricRecord({"num-examples": 0, "partition-id": pid, "skipped": 1}),
+               "client": _who(context)}
     if keep_arrays:
         content["arrays"] = msg.content["arrays"]
     return Message(content=RecordDict(content), reply_to=msg)
@@ -32,12 +42,13 @@ def _skip_reply(msg: Message, pid: int, keep_arrays: bool) -> Message:
 @app.train()
 def train(msg: Message, context: Context):
     conf = msg.content["config"]
-    pid = context.node_config["partition-id"]
+    pid, _site = client_identity(context.node_config)
+    label = client_label(context.node_config)
     if not is_selected(context.node_config, context.run_config):
-        logging.info(f"[CLIENT {pid}] Site not selected for this run; skipping training")
-        return _skip_reply(msg, pid, keep_arrays=True)
+        logging.info(f"[CLIENT {label}] Site not selected for this run; skipping training")
+        return _skip_reply(msg, pid, keep_arrays=True, context=context)
 
-    seed_everything(int(context.run_config.get("random-seed", 2021)) + int(pid))
+    seed_everything(client_seed(int(context.run_config.get("random-seed", 2021)), context.node_config))
     # Same function as the server and evaluate(), so the backbone always matches (pretrained or not).
     # The server only transmits trainable params (adapters + projections);
     # loading with strict=False overlays them onto the backbone.
@@ -54,18 +65,21 @@ def train(msg: Message, context: Context):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    npt = context.node_config["num-partitions"]
+    npt = int(context.node_config.get("num-partitions", 1))
     bs  = context.run_config.get("batch-size", 32)
     dataset_name = context.run_config.get("dataset-name", "VNMET")
     data_file = client_data_file(context.node_config, context.run_config)
     percent = int(context.run_config.get("data-percent", 100))
-    trainloader = load_client_train(pid, npt, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file, percent=percent)
+    solar = solar_options(context.run_config)
+    masked_loss = bool(solar and solar["daylight_mask"])
+    trainloader = load_client_train(pid, npt, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file,
+                                    percent=percent, solar=solar)
     
     # Get experiment directory from environment variable
     exp_dir = os.environ.get("FLOWER_EXP_DIR", ".")
     
     # Load validation set for tracking local overfitting
-    valloader = load_client_val(pid, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file)
+    valloader = load_client_val(pid, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file, solar=solar)
     logging.info(f"[CLIENT {pid}] Training on {len(trainloader.dataset)} samples, BatchSize={bs}")
 
     # --- Learning Rate Schedule: Warmup + Decay ---
@@ -119,13 +133,14 @@ def train(msg: Message, context: Context):
         proximal_mu=proximal_mu,
         c_local=c_local,
         c_global=c_global,
+        masked_loss=masked_loss,
     )
     train_duration = time.time() - train_start_time
 
     logging.info(f"[CLIENT {pid}] Training complete. AvgTrainLoss={train_loss:.6f}, Duration={train_duration:.2f}s")
     
     # Save training history
-    _save_metrics_history(history, exp_dir, pid, current_round)
+    _save_metrics_history(history, exp_dir, label, current_round)
 
     arrays = ArrayRecord(trainable_state_dict(model))
     metrics = MetricRecord({
@@ -135,7 +150,7 @@ def train(msg: Message, context: Context):
         "partition-id": pid,
     })
     
-    content_dict = {"arrays": arrays, "metrics": metrics}
+    content_dict = {"arrays": arrays, "metrics": metrics, "client": _who(context)}
     if new_c_local is not None:
         content_dict["c_local"] = ArrayRecord(new_c_local)
         logging.info(f"[CLIENT {pid}] SCAFFOLD: Returning updated local control variate")
@@ -152,9 +167,10 @@ def evaluate(msg: Message, context: Context):
     Evaluates on both the val and test splits; reports normalized and real-unit
     (m/s) errors plus the persistence baseline on the test windows.
     """
-    pid = context.node_config["partition-id"]
+    pid, _site = client_identity(context.node_config)
+    label = client_label(context.node_config)
     if not is_selected(context.node_config, context.run_config):
-        return _skip_reply(msg, pid, keep_arrays=False)
+        return _skip_reply(msg, pid, keep_arrays=False, context=context)
 
     configs = build_model_configs(context.run_config)
 
@@ -172,6 +188,9 @@ def evaluate(msg: Message, context: Context):
     dataset_name = context.run_config.get("dataset-name", "VNMET")
     data_file = client_data_file(context.node_config, context.run_config)
     save_predictions = bool(context.run_config.get("save-predictions", True))
+    solar = solar_options(context.run_config)
+    if solar is not None:
+        return _evaluate_solar(msg, model, device, pid, bs, configs, dataset_name, data_file, solar, context)
     config_record = msg.content.get("config", None)
     if config_record is not None:
         if hasattr(config_record, "data"):
@@ -196,7 +215,7 @@ def evaluate(msg: Message, context: Context):
     logging.info(f"[CLIENT {pid}] Validation complete. ValLoss={val_loss:.6f}, MAE={val_mae:.6f}, RMSE={val_rmse:.6f}, Duration={val_duration:.2f}s")
 
     if save_predictions:
-        _save_predictions_to_csv(val_preds, val_trues, exp_dir, pid, current_round, "val", configs.pred_len)
+        _save_predictions_to_csv(val_preds, val_trues, exp_dir, label, current_round, "val", configs.pred_len)
 
     # Test evaluation
     testloader = load_client_test(pid, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file)
@@ -209,7 +228,7 @@ def evaluate(msg: Message, context: Context):
     logging.info(f"[CLIENT {pid}] Test complete. TestLoss={test_loss:.6f}, MAE={test_mae:.6f}, RMSE={test_rmse:.6f}, Duration={test_duration:.2f}s")
 
     if save_predictions:
-        _save_predictions_to_csv(test_preds, test_trues, exp_dir, pid, current_round, "test", configs.pred_len)
+        _save_predictions_to_csv(test_preds, test_trues, exp_dir, label, current_round, "test", configs.pred_len)
 
     # Real units (plan T2.3): the target is scaled alone (features='S'), so errors scale
     # by the standard deviation of this site's train split, and values invert linearly.
@@ -231,7 +250,7 @@ def evaluate(msg: Message, context: Context):
         "test_rmse": float(test_rmse),
         "test_duration": float(test_duration)
     }
-    _save_eval_metrics(eval_metrics, exp_dir, pid)
+    _save_eval_metrics(eval_metrics, exp_dir, label)
 
     num_examples = len(valloader.dataset) + len(testloader.dataset)
     metrics = MetricRecord({
@@ -255,8 +274,51 @@ def evaluate(msg: Message, context: Context):
         "num-val-examples": len(valloader.dataset),
         "num-test-examples": len(testloader.dataset),
     })
-    content = RecordDict({"metrics": metrics})
+    content = RecordDict({"metrics": metrics, "client": _who(context)})
     return Message(content=content, reply_to=msg)
+
+
+def _evaluate_solar(msg, model, device, pid, bs, configs, dataset_name, data_file, solar, context):
+    """
+    Solar evaluation: errors in W/m2 of GHI (forecast k* x clear-sky GHI, or GHI directly),
+    for daylight hours (main numbers) and all hours, plus three baselines on the same windows.
+    The generic *_real keys carry the daylight numbers and smart persistence as the reference,
+    so the run page and result.json read them like wind's.
+    """
+    masked = bool(solar["daylight_mask"])
+    out = {}
+    sizes = {}
+    for split, loader_fn in (("val", load_client_val), ("test", load_client_test)):
+        loader = loader_fn(pid, bs=bs, cfg=configs, dataset_name=dataset_name, data_file=data_file, solar=solar)
+        start = time.time()
+        loss, mae, rmse, preds, _trues, aux = test_fn(model, loader, device=device, return_predictions=True,
+                                                     masked_loss=masked, return_aux=True)
+        ds = loader.dataset
+        std, mean = float(ds.scaler.scale_[-1]), float(ds.scaler.mean_[-1])
+        ghi = evaluate_ghi(preds, aux, mean, std, solar["target_kind"], solar["kstar_max"], ds.kstar_climatology)
+        out[split] = (loss, mae, rmse, time.time() - start, ghi)
+        sizes[split] = len(ds)
+        logging.info(f"[CLIENT {pid}] Solar {split}: daylight MAE={ghi['model']['mae']:.1f} W/m2, "
+                     f"smart persistence MAE={ghi['smart_persistence']['mae']:.1f} W/m2")
+
+    v_loss, v_mae, v_rmse, v_dur, v = out["val"]
+    t_loss, t_mae, t_rmse, t_dur, t = out["test"]
+    metrics = MetricRecord({
+        "num-examples": sizes["val"] + sizes["test"],
+        "partition-id": pid,
+        "val_loss": float(v_loss), "val_mae": float(v_mae), "val_rmse": float(v_rmse), "val_duration_sec": float(v_dur),
+        "test_loss": float(t_loss), "test_mae": float(t_mae), "test_rmse": float(t_rmse), "test_duration_sec": float(t_dur),
+        "val_mae_real": v["model"]["mae"], "val_rmse_real": v["model"]["rmse"],
+        "test_mae_real": t["model"]["mae"], "test_rmse_real": t["model"]["rmse"], "test_mbe_real": t["model"]["mbe"],
+        "test_mae_all_real": t["model"]["mae_all"], "test_rmse_all_real": t["model"]["rmse_all"],
+        "test_mean_real": t["mean_daylight_ghi"],
+        "persistence_mae_real": t["smart_persistence"]["mae"], "persistence_rmse_real": t["smart_persistence"]["rmse"],
+        "plain_persistence_mae_real": t["persistence"]["mae"], "plain_persistence_rmse_real": t["persistence"]["rmse"],
+        "climatology_mae_real": t["climatology"]["mae"], "climatology_rmse_real": t["climatology"]["rmse"],
+        "num-val-examples": sizes["val"],
+        "num-test-examples": sizes["test"],
+    })
+    return Message(content=RecordDict({"metrics": metrics, "client": _who(context)}), reply_to=msg)
 
 
 def _save_predictions_to_csv(preds, trues, exp_dir, client_id, round_num, split_name, pred_len):

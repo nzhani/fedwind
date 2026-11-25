@@ -1,0 +1,38 @@
+# Central gateway (SITE_NETWORK_PLAN.md §1–2): the only door for plants.
+# Client certificate signed by the FedWind site CA and not revoked, or the TLS handshake fails.
+log_format sites '$remote_addr cn="$ssl_client_s_dn" verify=$ssl_client_verify $status "$request" $request_time';
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name sites.fedwind.test;
+    access_log /dev/stdout sites;
+
+    ssl_certificate         /pki/gateway.crt;      # public certificate (Let's Encrypt in production)
+    ssl_certificate_key     /pki/gateway.key;
+    ssl_protocols           TLSv1.3;
+    ssl_client_certificate  /pki/site-ca.crt;      # only plant certificates from our site CA
+    ssl_verify_client       on;
+    ssl_crl                 /pki/site-ca.crl;      # revoked plants
+
+    client_max_body_size    1g;                    # model updates (75 MB at 72 h today)
+
+    # Flower Fleet API only. Control and ServerAppIo are never proxied.
+    location /flwr.proto.Fleet/ {
+        grpc_pass                    grpcs://superlink:9092;
+        grpc_ssl_trusted_certificate /pki/internal-ca.crt;
+        grpc_ssl_verify              on;
+        grpc_ssl_name                superlink;
+        grpc_ssl_server_name         on;
+        grpc_read_timeout            900s;
+        grpc_send_timeout            900s;
+    }
+
+    # Placeholder for the site API: shows which plant the certificate says this is
+    location = /site-api/whoami {
+        default_type text/plain;
+        return 200 "site=$ssl_client_s_dn verify=$ssl_client_verify\n";
+    }
+
+    location / { return 404; }
+}
