@@ -93,6 +93,15 @@ class SiteConsents(BaseModel):
     public_forecasts: bool = False       # show this site's forecasts to viewers
 
 
+class ConsentUpdate(BaseModel):
+    """An operator changes participation of an approved or active plant (SITE_NETWORK_PLAN.md §4 step 6).
+    train false = paused: the plant stays connected and keeps its forecasts but joins no training run."""
+    model_config = ConfigDict(extra="forbid")
+    train: bool
+    share_forecast_window: bool
+    public_forecasts: bool
+
+
 class SiteRegistration(BaseModel):
     """What an operator submits for a new site (and may edit while it waits for approval)."""
 
@@ -138,6 +147,7 @@ class SiteConnection(BaseModel):
     gaps_today: Optional[int] = None
     heartbeat_s: int = 30
     train_hours: Optional[int] = None    # hours in the plant's training store (agent 0.2+)
+    update_available: Optional[str] = None  # a newer site kit version (M8)
     quality_7d: List[Dict[str, Any]] = Field(default_factory=list)  # [{day, rows, gaps, flagged, curtailed}]
 
 
@@ -209,6 +219,21 @@ class HeartbeatRequest(BaseModel):
     disk_free_gb: Optional[float] = Field(None, ge=0)
     gpu: Optional[str] = Field(None, max_length=100)
     train_hours: Optional[int] = Field(None, ge=0, le=10_000_000)   # size of the plant's training store
+
+
+class RenewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    csr: str = Field(min_length=100, max_length=10000)   # PEM, CN = site id, a new key made at the plant
+
+
+class LocalForecastRequest(BaseModel):
+    """Local mode (M7): a forecast the plant made with the downloaded model; only the forecast is sent."""
+    model_config = ConfigDict(extra="forbid")
+    model_version_id: int
+    horizon: int = Field(ge=1, le=1000)
+    issued_at: str                                    # ISO UTC, the newest observed hour
+    values: List[Optional[float]] = Field(max_length=1000)   # wind speed m/s or GHI W/m2, one per hour ahead
+    power_kw: Optional[List[Optional[float]]] = Field(None, max_length=1000)
 
 
 class ForecastInputRequest(BaseModel):
@@ -310,7 +335,9 @@ class ClientRound(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     site: str
-    status: Literal["replied", "dropped"]
+    # rejected: the update failed the checks before aggregation (my_flower_app/robust.py), with a reason
+    status: Literal["replied", "dropped", "rejected"]
+    reason: Optional[str] = None
     num_examples: Optional[int] = None
     train_loss: Optional[float] = None
     val_mae: Optional[float] = None
@@ -385,6 +412,20 @@ class RegisteredModel(BaseModel):
     rounds_completed: Optional[int] = None
     strategy: Optional[str] = None
     promoted_by: Optional[str] = None
+    # Model registry (SITE_NETWORK_PLAN.md M7); absent when the API runs without a database
+    id: Optional[int] = None
+    version: Optional[int] = None
+    status: Optional[Literal["candidate", "promoted", "retired", "rejected"]] = None
+    origin: Optional[str] = None
+    model_path: Optional[str] = None      # relative to the models folder; what inference loads
+    sha256: Optional[str] = None
+    size_bytes: Optional[int] = None
+    data_percent: Optional[float] = None
+    gates: Optional[Dict[str, Any]] = None
+    created_at: Optional[str] = None
+    veto_until: Optional[str] = None
+    retired_at: Optional[str] = None
+    note: Optional[str] = None
 
 
 class ModelListResponse(BaseModel):
@@ -424,6 +465,7 @@ class ForecastModelRef(BaseModel):
     skill_vs_persistence: Optional[float] = None
     skill_reference: Optional[str] = None
     data_percent: Optional[float] = None  # < 100: a small demo run, labelled as such
+    version: Optional[int] = None         # model registry version (M7)
 
 
 class ForecastResponse(BaseModel):
@@ -438,5 +480,9 @@ class ForecastResponse(BaseModel):
     capacity_kw: Optional[float] = None
     # "plant": the site's registered capacity; "reference": a 2 MW turbine / 1 MW PV stand-in (lab sites)
     power_basis: Literal["plant", "reference"] = "reference"
-    source: Literal["site_inference", "central"] = "site_inference"
+    # site_inference: lab site; central: made here from the plant's shared window; local: made at the plant
+    source: Literal["site_inference", "central", "local"] = "site_inference"
     simulated: bool = False
+    stored_at: Optional[str] = None       # when the stored forecast was made (M7); None = made for this request
+    # FR-25: {"text", "source": "claude" | "rules", "facts"} (app/services/forecast_summary.py)
+    summary: Optional[Dict[str, Any]] = None

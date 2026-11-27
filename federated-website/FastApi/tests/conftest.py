@@ -76,6 +76,8 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("NOTIFY_LOOP", "off")          # tests drive app.services.notifications themselves
     monkeypatch.setenv("SITE_MAINTENANCE_LOOP", "off")
     monkeypatch.setenv("SCHEDULER_LOOP", "off")
+    monkeypatch.setenv("PLATFORM_JOBS_LOOP", "off")
+    monkeypatch.setenv("RATE_LIMIT", "off")
     monkeypatch.delenv("TRAIN_SCHEDULE", raising=False)
     monkeypatch.delenv("SITE_CA_DIR", raising=False)  # the CA goes to <data>/site-ca
     monkeypatch.delenv("FLOWER_NODE_AUTH", raising=False)

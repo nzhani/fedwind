@@ -1,0 +1,19 @@
+# Lint and format settings for the whole repository (requirement NFR-12). Not a package.
+#   scripts/check.sh            what CI runs, locally
+# black: new and changed Python files must be formatted; the older code base is formatted file by
+# file as it is touched (a one-time `black .` once every open branch is merged).
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+extend-exclude = '''(\.venv|node_modules|datasets|deploy/gateway-spike/pki)'''
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = [".venv", "node_modules", "Long-term_Forecasting/datasets", "Long-term_Forecasting/models",
+                  "Long-term_Forecasting/utils", "federated-website/FastApi/uploads", "deploy/gateway-spike"]
+
+[tool.ruff.lint]
+# Real errors only: syntax errors, undefined names, unused imports and variables, shadowing.
+select = ["E9", "F"]

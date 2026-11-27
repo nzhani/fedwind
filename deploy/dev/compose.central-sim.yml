@@ -1,0 +1,24 @@
+# Simulated plants of the central stack on the same machine (deploy/dev/spawn_sites.sh), layered
+# over a kit's docker-compose.yml and deploy/sim/compose.sim.yml:
+#   - SITES_HOST resolves to this machine, where the central gateway listens on 443
+#   - the agent and the tunnel trust the gateway's certificate (the self-signed placeholder until
+#     Let's Encrypt has run), copied to SIM_GATEWAY_CERT by spawn_sites.sh
+#   - FEDWIND_TEST_POISON (load test only, one plant): its SuperNode sends a broken update
+services:
+  agent:
+    extra_hosts:
+      - "${SITES_HOST:?}:host-gateway"
+    environment:
+      SITE_API_CA_FILE: /gateway/gateway.crt
+    volumes:
+      - "${SIM_GATEWAY_CERT:?}:/gateway/gateway.crt:ro"
+  tunnel:
+    extra_hosts:
+      - "${SITES_HOST:?}:host-gateway"
+    environment:
+      GATEWAY_CA_FILE: /gateway/gateway.crt
+    volumes:
+      - "${SIM_GATEWAY_CERT:?}:/gateway/gateway.crt:ro"
+  supernode:
+    environment:
+      FEDWIND_TEST_POISON: "${FEDWIND_TEST_POISON:-}"

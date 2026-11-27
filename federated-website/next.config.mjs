@@ -3,7 +3,9 @@
 // The browser calls the API on the website's own address (/api/...); the web server forwards it.
 // One address works for localhost and for a public tunnel, and the session cookie stays first-party.
 // API_INTERNAL_URL: where this server reaches the API (Docker: http://api:8000, set at build time).
-const API_INTERNAL_URL = (process.env.API_INTERNAL_URL || "http://localhost:8001").replace(/\/$/, "")
+// Render passes "host:port" of the API on its private network; add the scheme when it is missing.
+const rawApi = (process.env.API_INTERNAL_URL || "http://localhost:8001").replace(/\/$/, "")
+const API_INTERNAL_URL = rawApi.includes("://") ? rawApi : `http://${rawApi}`
 
 const nextConfig = {
   typescript: {

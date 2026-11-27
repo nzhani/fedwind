@@ -24,7 +24,6 @@ from app.services import accounts
 from app.services.accounts import User
 from app.platform_schemas import (
     ACTIVE_STATUSES,
-    EnergyType,
     ExperimentConfig,
     FederationStatus,
     RunDetail,

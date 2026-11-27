@@ -7,13 +7,19 @@
 #
 #   deploy/sim/run_site.sh ~/Downloads/fedwind-site-<id>.zip
 #   deploy/sim/stop_site.sh <id> [--forget]
+#
+# Optional (deploy/dev/spawn_sites.sh sets these for plants of the central stack):
+#   SIM_SITE_API_URL     where the plant reaches the site API (default: this computer's lab API)
+#   SIM_EXTRA_COMPOSE    one more compose file layered on top (gateway trust, test switches)
+#   SIM_HF_CACHE         GPT-2 cache folder for the kit's Flower SuperNode
+#   SIM_INBOX            a prepared hourly export (deploy/sim/make_export.py) used as the plant data
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 ZIP="${1:?usage: run_site.sh <fedwind-site-<id>.zip>}"
 SIM_DIR="$REPO/deploy/sim/sites"
 API_URL="${SIM_SITE_API_URL:-http://host.docker.internal:8001}"
-IMAGE="fedwind-site-agent:0.2.0"
+IMAGE="fedwind-site-agent:0.3.0"
 
 [[ -f "$ZIP" ]] || { echo "No such file: $ZIP" >&2; exit 1; }
 root="$(unzip -Z1 "$ZIP" | head -1 | cut -d/ -f1)"
@@ -32,10 +38,24 @@ unzip -q "$ZIP" -d "$tmp"
 mv "$tmp/$root" "$dest"
 rmdir "$tmp"
 
-sed -i \
-  -e "s|^DATA_SOURCE=.*|DATA_SOURCE=nasa_power|" \
-  -e "s|^SITE_API_URL=.*|SITE_API_URL=$API_URL|" \
-  "$dest/.env"
+# Data: a prepared hourly export (SIM_INBOX, like a real plant's SCADA export) or NASA POWER downloads
+if [[ -n "${SIM_INBOX:-}" ]]; then
+  [[ -f "$SIM_INBOX" ]] || { echo "No such export: $SIM_INBOX" >&2; exit 1; }
+  mkdir -p "$dest/data/inbox" && cp "$SIM_INBOX" "$dest/data/inbox/"
+  data_source=csv_inbox
+else
+  data_source=nasa_power
+fi
+# Certificate kits (central server) keep their gateway address; development kits talk to the API here
+if grep -q '^SITE_AUTH_MODE=mtls' "$dest/.env" && [[ -z "${SIM_SITE_API_URL:-}" ]]; then
+  sed -i -e "s|^DATA_SOURCE=.*|DATA_SOURCE=$data_source|" "$dest/.env"
+else
+  sed -i \
+    -e "s|^DATA_SOURCE=.*|DATA_SOURCE=$data_source|" \
+    -e "s|^SITE_API_URL=.*|SITE_API_URL=$API_URL|" \
+    "$dest/.env"
+fi
+[[ -n "${SIM_HF_CACHE:-}" ]] && sed -i "s|^HF_CACHE=.*|HF_CACHE=$SIM_HF_CACHE|" "$dest/.env"
 printf '\n# Changed by deploy/sim/run_site.sh: simulated plant (NASA POWER data), API on this computer\n' >> "$dest/.env"
 
 # NASA POWER data kept by demo_reset.sh for these coordinates: the plant works offline too
@@ -50,7 +70,9 @@ fi
 docker image inspect "$IMAGE" >/dev/null 2>&1 \
   || docker build -q -f "$REPO/site_agent/Dockerfile" -t "$IMAGE" "$REPO" >/dev/null
 
-SIM_UID="$(id -u)" SIM_GID="$(id -g)" docker compose -f "$dest/docker-compose.yml" -f "$REPO/deploy/sim/compose.sim.yml" up -d
+files=(-f "$dest/docker-compose.yml" -f "$REPO/deploy/sim/compose.sim.yml")
+[[ -n "${SIM_EXTRA_COMPOSE:-}" ]] && files+=(-f "$SIM_EXTRA_COMPOSE")
+SIM_UID="$(id -u)" SIM_GID="$(id -g)" docker compose "${files[@]}" up -d
 echo
 echo "Simulated plant '$site_id' is starting; its page turns Online within a minute."
 echo "Logs: docker compose -f $dest/docker-compose.yml logs -f agent"

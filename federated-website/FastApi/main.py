@@ -115,6 +115,11 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],  # the site kit's file name
 )
 
+# Rate limits per client address (app/ratelimit.py; RATE_LIMIT=off to switch off)
+from app import ratelimit  # noqa: E402
+
+app.middleware("http")(ratelimit.middleware)
+
 
 # ---------------------------------------------------------------------------
 # Routers
@@ -179,6 +184,9 @@ async def startup_event():
         print(f"  Scheduled training: {'on (' + os.environ.get('TRAIN_SCHEDULE', '') + ')' if scheduler.start_background() else 'off (no TRAIN_SCHEDULE)'}")
     except ValueError as e:
         print(f"WARNING: scheduled training off: {e}")
+
+    from app.services import platform_jobs
+    print(f"  Platform jobs (model versions, stored forecasts): {'on' if platform_jobs.start_background() else 'off'}")
 
     from app.services.notifications import start_background
     print(f"  Telegram alerts: {'on' if start_background() else 'off (no BOT_TOKEN, or NOTIFY_LOOP=off)'}")

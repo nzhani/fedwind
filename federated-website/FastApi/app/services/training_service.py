@@ -11,7 +11,6 @@ Responsibilities:
 import os
 import csv
 import requests
-from datetime import datetime
 from typing import List
 
 from app.schemas import (

@@ -32,6 +32,7 @@ def snapshot(agent) -> dict:
         "training_store_file": str(agent.store.path) if agent.store.path.is_file() else None,
         "certificate_days_left": round(days, 1) if days is not None else None,
         "shares_forecast_window": bool((agent.site_config().get("consents") or {}).get("share_forecast_window")),
+        "update_available": (agent.update or {}).get("version"),
     }
 
 

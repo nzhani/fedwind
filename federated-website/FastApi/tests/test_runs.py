@@ -137,7 +137,7 @@ def test_bad_run_ids_are_404(client):
 
 
 def test_stopped_run_stays_stopped_after_server_failure(client, data_dir):
-    fake = _connect()
+    _connect()
     run_id = _start(client).json()["run_id"]
     client.post(f"/api/runs/{run_id}/stop")
     (data_dir / "runs" / run_id / "result.json").write_text(

@@ -22,6 +22,10 @@ from typing import Any, Mapping, Optional
 import torch
 
 
+LEADS = (1, 6, 24)   # hours ahead reported separately (evaluation.LEADS)
+POWER_KEYS = ("power_mae_kw", "power_rmse_kw", "power_nmae", "power_nrmse", "power_capacity_kw")
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -44,6 +48,69 @@ def _mean(values) -> Optional[float]:
 
 def array_bytes(state: Mapping[str, torch.Tensor]) -> int:
     return int(sum(t.numel() * t.element_size() for t in state.values()))
+
+
+def site_summary(e: Mapping, solar: bool) -> dict:
+    """Test metrics of one site from its client-side evaluation keys (also used by the baselines,
+    so federated runs and baselines are summarised by the same code)."""
+    mae, rmse = _num(e.get("test_mae_real")), _num(e.get("test_rmse_real"))
+    mean_obs, persist = _num(e.get("test_mean_real")), _num(e.get("persistence_mae_real"))
+    site = {
+        "mae": mae,
+        "rmse": rmse,
+        "nmae": mae / mean_obs if mae is not None and mean_obs else None,
+        "nrmse": rmse / mean_obs if rmse is not None and mean_obs else None,
+        "persistence_mae": persist,
+        "skill_vs_persistence": 1 - mae / persist if mae is not None and persist else None,
+    }
+    if solar:
+        # Daylight hours; reference = smart persistence, skill on RMSE (solar convention)
+        p_rmse, c_rmse = _num(e.get("persistence_rmse_real")), _num(e.get("climatology_rmse_real"))
+        site.update({
+            "mbe": _num(e.get("test_mbe_real")),
+            "mae_all_hours": _num(e.get("test_mae_all_real")),
+            "rmse_all_hours": _num(e.get("test_rmse_all_real")),
+            "persistence_rmse": p_rmse,
+            "plain_persistence_mae": _num(e.get("plain_persistence_mae_real")),
+            "climatology_mae": _num(e.get("climatology_mae_real")),
+            "climatology_rmse": c_rmse,
+            "skill_vs_persistence": 1 - rmse / p_rmse if rmse is not None and p_rmse else None,
+            "skill_vs_climatology": 1 - rmse / c_rmse if rmse is not None and c_rmse else None,
+        })
+    # DR-06: power errors of the reference unit / its capacity; FR-06/DR-08: errors by lead time
+    site.update({k: _num(e.get(k)) for k in POWER_KEYS})
+    site["by_lead"] = {
+        str(h): {"mae": _num(e.get(f"test_mae_real_h{h}")), "rmse": _num(e.get(f"test_rmse_real_h{h}")),
+                 "reference_mae": _num(e.get(f"ref_mae_real_h{h}")),
+                 "reference_rmse": _num(e.get(f"ref_rmse_real_h{h}")), "skill": _num(e.get(f"skill_h{h}"))}
+        for h in LEADS if e.get(f"test_mae_real_h{h}") is not None}
+    return site
+
+
+def overall_real(per_site: Mapping[str, dict], solar: bool) -> dict:
+    """Means over sites of site_summary() results (federated runs and baselines alike)."""
+    sites = list(per_site.values())
+    leads = sorted({h for s in sites for h in s["by_lead"]}, key=int)
+    return {
+        "mae": _mean(s["mae"] for s in sites),
+        "rmse": _mean(s["rmse"] for s in sites),
+        "nmae": _mean(s["nmae"] for s in sites),
+        "nrmse": _mean(s["nrmse"] for s in sites),
+        "skill_vs_persistence": _mean(s["skill_vs_persistence"] for s in sites),
+        "power_nmae": _mean(s["power_nmae"] for s in sites),
+        "power_nrmse": _mean(s["power_nrmse"] for s in sites),
+        "power_basis": "reference 1 MW PV plant (PR 0.8), all hours" if solar
+                       else "reference 2 MW turbine (3/12/25 m/s), all hours",
+        "by_lead": {h: {"mae": _mean(s["by_lead"].get(h, {}).get("mae") for s in sites),
+                        "rmse": _mean(s["by_lead"].get(h, {}).get("rmse") for s in sites),
+                        "skill": _mean(s["by_lead"].get(h, {}).get("skill") for s in sites)}
+                    for h in leads},
+        **({
+            "mbe": _mean(s["mbe"] for s in sites),
+            "mae_all_hours": _mean(s["mae_all_hours"] for s in sites),
+            "skill_vs_climatology": _mean(s["skill_vs_climatology"] for s in sites),
+        } if solar else {}),
+    }
 
 
 class RunLogger:
@@ -167,35 +234,9 @@ class RunLogger:
         backbone_bytes: int,
         stopped_early: bool,
     ) -> dict:
-        per_site = {}
-        for pid, e in sorted(best_eval.items(), key=lambda kv: str(kv[0])):
-            mae, rmse = _num(e.get("test_mae_real")), _num(e.get("test_rmse_real"))
-            mean_obs, persist = _num(e.get("test_mean_real")), _num(e.get("persistence_mae_real"))
-            site = {
-                "mae": mae,
-                "rmse": rmse,
-                "nmae": mae / mean_obs if mae is not None and mean_obs else None,
-                "nrmse": rmse / mean_obs if rmse is not None and mean_obs else None,
-                "persistence_mae": persist,
-                "skill_vs_persistence": 1 - mae / persist if mae is not None and persist else None,
-            }
-            if self.solar:
-                # Daylight hours; reference = smart persistence, skill on RMSE (solar convention)
-                p_rmse, c_rmse = _num(e.get("persistence_rmse_real")), _num(e.get("climatology_rmse_real"))
-                site.update({
-                    "mbe": _num(e.get("test_mbe_real")),
-                    "mae_all_hours": _num(e.get("test_mae_all_real")),
-                    "rmse_all_hours": _num(e.get("test_rmse_all_real")),
-                    "persistence_rmse": p_rmse,
-                    "plain_persistence_mae": _num(e.get("plain_persistence_mae_real")),
-                    "climatology_mae": _num(e.get("climatology_mae_real")),
-                    "climatology_rmse": c_rmse,
-                    "skill_vs_persistence": 1 - rmse / p_rmse if rmse is not None and p_rmse else None,
-                    "skill_vs_climatology": 1 - rmse / c_rmse if rmse is not None and c_rmse else None,
-                })
-            per_site[self.site(pid)] = site
+        per_site = {self.site(k): site_summary(e, self.solar)
+                    for k, e in sorted(best_eval.items(), key=lambda kv: str(kv[0]))}
         evs = list(best_eval.values())
-        sites = list(per_site.values())
         result = {
             "run_id": self.run_id,
             "status": "done",
@@ -211,19 +252,9 @@ class RunLogger:
                     "mae": _mean(e.get("test_mae") for e in evs),
                     "rmse": _mean(e.get("test_rmse") for e in evs),
                 },
-                # Means over sites; nMAE/nRMSE divide by each site's mean observed test speed.
-                "real": {
-                    "mae": _mean(s["mae"] for s in sites),
-                    "rmse": _mean(s["rmse"] for s in sites),
-                    "nmae": _mean(s["nmae"] for s in sites),
-                    "nrmse": _mean(s["nrmse"] for s in sites),
-                    "skill_vs_persistence": _mean(s["skill_vs_persistence"] for s in sites),
-                    **({
-                        "mbe": _mean(s["mbe"] for s in sites),
-                        "mae_all_hours": _mean(s["mae_all_hours"] for s in sites),
-                        "skill_vs_climatology": _mean(s["skill_vs_climatology"] for s in sites),
-                    } if self.solar else {}),
-                },
+                # Means over sites. nMAE/nRMSE divide by each site's mean observed test value;
+                # power_nmae/power_nrmse divide the reference unit's power errors by its capacity (DR-06).
+                "real": overall_real(per_site, self.solar),
                 "per_site": per_site,
                 "reference": ("smart persistence (k* now x clear sky), RMSE skill, daylight hours" if self.solar
                               else "persistence (last value), MAE skill"),

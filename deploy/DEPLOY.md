@@ -226,8 +226,33 @@ SITES_HOST=sites.example.kz deploy/central/check_ports.sh <public address>   # f
   the Flower Fleet API are routed. The gateway reloads within 30 s when the API publishes a new CRL.
 - The API runs with `SITE_AUTH_MODE=mtls` and `FLOWER_NODE_AUTH=on`: an enrolled plant's SuperNode
   key is registered with the SuperLink, and revoking the plant unregisters it.
-- Volumes to back up: `db-data`, `site-ca` (the site CA key), `internal-ca`, and `CENTRAL_DATA`
-  (runs, models). Plant kits: `deploy/site/README.md`.
+- **Models (M7):** every finished run becomes a model version (Admin → Models). Scheduled runs
+  are promoted automatically when all gates pass (all data, beats persistence, beats the current
+  model, no site more than 10 % worse); an admin can veto for 24 h. Rolling back = promoting an
+  older version. Plants that share their window get stored forecasts every time new data or a new
+  model arrives; plants that don't download the model and send their own forecasts (local mode).
+- **Backups (M8):** `deploy/central/backup.sh` (database, models, both CA keys; set
+  `BACKUP_PASSPHRASE_FILE` to encrypt) from cron, daily; `deploy/central/restore.sh <folder>` restores.
+  Test a restore on a spare machine once per semester.
+- **Health (M8):** Admin → Health checks the database, SuperLink, inference, promoted models,
+  forecast freshness, plants online, certificates, kit versions, the CRL, backups and disk.
+- Plants renew their certificates 30 days before expiry by themselves (agent 0.3.0); older kits see
+  an update notice on their plant page. Rate limits per client address apply to every API route;
+  old audit entries, sessions and messages are deleted after their retention period.
+  Plant kits: `deploy/site/README.md`.
+
+## 6d. Runs trained elsewhere (Irgetas, another machine)
+
+A run made on a cluster appears on the website like its own runs (dashboard, results, a model
+version that can serve forecasts) when it was written by the Flower app with the run-config values
+`runs-dir` and `run-id` set (so the folder has `result.json`, `checkpoints/best.pt`, `metrics.jsonl`,
+and ideally `run_config.toml`). Copy the folder into the data folder's `import/`, then:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec api python -m app.cli import-run /data/import/<run folder> [--promote]
+```
+
+The checkpoint must come from the same model code version as the website's inference service.
 
 ## 7. Without Docker
 

@@ -3,14 +3,12 @@ Training Client - Bridge to the external centralized training repository.
 """
 
 import os
-import sys
 import time
 import logging
 import tempfile
 import subprocess
 import shutil
 
-import numpy as np
 import pandas as pd
 
 from app.schemas import TrainingInput, TrainingOutput
@@ -51,7 +49,6 @@ def run_centralized_training(inp: TrainingInput, job_id: str = None) -> Training
     """
     Execute centralized training by calling run_centralized.py as a subprocess.
     """
-    import subprocess
     start = time.time()
     logger.info("=" * 70)
     logger.info("CENTRALIZED TRAINING REQUEST RECEIVED")

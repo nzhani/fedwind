@@ -155,6 +155,10 @@ export interface SiteConnection {
   rows_today?: number | null
   gaps_today?: number | null
   heartbeat_s: number
+  /** Hours in the plant's training store (agent 0.2+) */
+  train_hours?: number | null
+  /** A newer site kit version (M8) */
+  update_available?: string | null
   quality_7d?: QualityDay[]
 }
 
@@ -213,7 +217,9 @@ export interface ExperimentConfig {
 
 export interface ClientRound {
   site: string
-  status: "replied" | "dropped"
+  /** rejected: the update failed the checks before aggregation (reason says why) */
+  status: "replied" | "dropped" | "rejected"
+  reason?: string | null
   num_examples?: number | null
   train_loss?: number | null
   val_mae?: number | null
@@ -251,8 +257,9 @@ export interface RunResult {
   energy_type?: EnergyType
   metrics?: {
     normalized?: Record<string, number>
-    real?: Record<string, number>
-    per_site?: Record<string, Record<string, number>>
+    /** Numbers, plus power_basis (text) and by_lead ({"1"|"6"|"24": {mae, rmse, skill}}) from newer runs */
+    real?: Record<string, unknown>
+    per_site?: Record<string, Record<string, unknown>>
     reference?: string
   }
   timing?: { total_s?: number; mean_round_s?: number }
@@ -319,6 +326,8 @@ export interface ForecastModelRef {
   skill_reference?: string | null
   /** Share of the training data the run used; below 100 it is a small demo run */
   data_percent?: number | null
+  /** Model registry version (M7) */
+  version?: number | null
 }
 
 export interface ForecastResponse {
@@ -333,8 +342,13 @@ export interface ForecastResponse {
   capacity_kw?: number | null
   /** "plant": the site's registered capacity; "reference": 2 MW turbine / 1 MW PV (lab sites) */
   power_basis: "plant" | "reference"
-  source: "site_inference" | "central"
+  /** site_inference: lab site; central: made here from the plant's shared window; local: made at the plant */
+  source: "site_inference" | "central" | "local"
   simulated: boolean
+  /** When the stored forecast was made; null = made for this request */
+  stored_at?: string | null
+  /** FR-25: short text summary; source "claude" when Claude worded it, "rules" for the fixed template */
+  summary?: { text: string; source: "claude" | "rules" } | null
 }
 
 export interface RegisteredModel {
@@ -347,6 +361,20 @@ export interface RegisteredModel {
   rounds_completed?: number | null
   strategy?: string | null
   promoted_by?: string | null
+  // Model registry (M7)
+  id?: number | null
+  version?: number | null
+  status?: "candidate" | "promoted" | "retired" | "rejected" | null
+  origin?: "manual" | "schedule" | "import" | null
+  model_path?: string | null
+  sha256?: string | null
+  size_bytes?: number | null
+  data_percent?: number | null
+  gates?: { passed: boolean; gates: { name: string; passed: boolean; detail: string }[]; compared_with?: number | null } | null
+  created_at?: string | null
+  veto_until?: string | null
+  retired_at?: string | null
+  note?: string | null
 }
 
 export class PlatformApiError extends Error {
@@ -451,6 +479,26 @@ export function getForecast(params: {
 
 export async function listModels(): Promise<RegisteredModel[]> {
   return (await request<{ models: RegisteredModel[] }>("/api/models")).models
+}
+
+export function listModelVersions(): Promise<RegisteredModel[]> {
+  return request("/api/models/versions")
+}
+
+export function promoteModelVersion(id: number, note?: string): Promise<RegisteredModel> {
+  return request(`/api/models/versions/${id}/promote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note: note ?? null }),
+  })
+}
+
+export function vetoModelVersion(id: number, note: string): Promise<RegisteredModel> {
+  return request(`/api/models/versions/${id}/veto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note }),
+  })
 }
 
 export function promoteModel(runId: string): Promise<RegisteredModel> {
@@ -573,6 +621,22 @@ export interface AdminOverview {
   recent: AuditEntry[]
 }
 
+export interface HealthCheck {
+  name: string
+  status: "ok" | "warn" | "error"
+  detail: string
+}
+
+export interface HealthReport {
+  status: "ok" | "warn" | "error"
+  checked_at: string
+  checks: HealthCheck[]
+}
+
+export function getHealthReport(): Promise<HealthReport> {
+  return request("/api/admin/health")
+}
+
 export function getAdminOverview(): Promise<AdminOverview> {
   return request("/api/admin/overview")
 }
@@ -595,6 +659,22 @@ export function getMySite(id: string): Promise<SiteDetail> {
 
 export function updateMySite(id: string, body: SiteRegistration): Promise<SiteDetail> {
   return request(`/api/my/sites/${encodeURIComponent(id)}`, { method: "PUT", ...json(body) })
+}
+
+export interface ConsentUpdate {
+  train: boolean
+  share_forecast_window: boolean
+  public_forecasts: boolean
+}
+
+/** Pause or resume training, share the forecast window or not, public forecasts on or off. */
+export function updateConsents(id: string, body: ConsentUpdate): Promise<SiteDetail> {
+  return request(`/api/my/sites/${encodeURIComponent(id)}/consents`, { method: "PUT", ...json(body) })
+}
+
+/** Take the plant out of the federation for good (credentials revoked). */
+export function leaveFederation(id: string, note: string): Promise<SiteDetail> {
+  return request(`/api/my/sites/${encodeURIComponent(id)}/leave`, { method: "POST", ...json({ note }) })
 }
 
 export function decideSite(id: string, action: SiteAction, note?: string): Promise<SiteDetail> {

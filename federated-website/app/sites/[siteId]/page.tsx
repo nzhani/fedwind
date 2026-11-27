@@ -164,7 +164,9 @@ export default function PlantPage() {
                 </Card>
               )}
               <ActivityCard site={site} now={now} />
-              {plant && <ConsentsCard site={site} />}
+              {plant && (
+                <ConsentsCard site={site} editable={isAdmin || user.role === "operator"} onChanged={(s) => (setSite(s), load())} />
+              )}
             </div>
           </div>
         </div>

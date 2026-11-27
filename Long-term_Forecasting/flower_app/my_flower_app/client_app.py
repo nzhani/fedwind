@@ -3,7 +3,6 @@
 import torch
 import time
 import os
-import sys
 import pandas as pd
 import numpy as np
 from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, RecordDict
@@ -12,7 +11,9 @@ from flwr.clientapp import ClientApp
 from my_flower_app.task import Net, load_client_train, load_client_val, load_client_test, persistence_errors, train as train_fn, test as test_fn, trainable_state_dict
 from my_flower_app.experiment import (build_model_configs, client_data_file, client_identity, client_label,
                                       client_seed, is_selected, seed_everything)
-from my_flower_app.solar import evaluate_ghi, options as solar_options
+from my_flower_app.solar import (AUX_DAYLIGHT, AUX_GHI, AUX_GHI_CS, AUX_KSTAR_LAST, evaluate_ghi, forecast_ghi,
+                                 kstar_to_ghi, options as solar_options)
+from my_flower_app import evaluation
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -142,7 +143,14 @@ def train(msg: Message, context: Context):
     # Save training history
     _save_metrics_history(history, exp_dir, label, current_round)
 
-    arrays = ArrayRecord(trainable_state_dict(model))
+    state = trainable_state_dict(model)
+    poison = os.environ.get("FEDWIND_TEST_POISON", "")
+    if poison:
+        # Scale/security test only (deploy/dev/load_test.sh sets this on ONE simulated plant): send a
+        # broken update so the server's checks (robust.py) can be seen rejecting it
+        logging.warning(f"[CLIENT {label}] FEDWIND_TEST_POISON={poison}: sending a deliberately broken update")
+        state = {k: (v * 1000.0 if poison == "scale" else v.clone().fill_(float("nan"))) for k, v in state.items()}
+    arrays = ArrayRecord(state)
     metrics = MetricRecord({
         "train_loss": float(train_loss),
         "train_duration_sec": float(train_duration),
@@ -236,6 +244,13 @@ def evaluate(msg: Message, context: Context):
     std, mean = float(scaler.scale_[-1]), float(scaler.mean_[-1])
     persist_mae, persist_rmse = persistence_errors(testloader, configs.pred_len)
     test_mean_real = float(np.mean(test_trues) * std + mean) if test_trues.size else float("nan")
+    # DR-06 power errors / capacity and FR-06/DR-08 errors at 1, 6, 24 h (my_flower_app/evaluation.py)
+    extras = {}
+    if test_preds.size:
+        last = evaluation.last_inputs(testloader)
+        n = test_preds.shape[0]
+        extras = evaluation.wind_extras(test_preds.reshape(n, -1) * std + mean, test_trues.reshape(n, -1) * std + mean,
+                                        last[:n] * std + mean)
 
     # Save scalar metrics
     eval_metrics = {
@@ -273,6 +288,7 @@ def evaluate(msg: Message, context: Context):
         "persistence_rmse_real": float(persist_rmse * std),
         "num-val-examples": len(valloader.dataset),
         "num-test-examples": len(testloader.dataset),
+        **{k: float(v) for k, v in extras.items()},
     })
     content = RecordDict({"metrics": metrics, "client": _who(context)})
     return Message(content=content, reply_to=msg)
@@ -296,6 +312,14 @@ def _evaluate_solar(msg, model, device, pid, bs, configs, dataset_name, data_fil
         ds = loader.dataset
         std, mean = float(ds.scaler.scale_[-1]), float(ds.scaler.mean_[-1])
         ghi = evaluate_ghi(preds, aux, mean, std, solar["target_kind"], solar["kstar_max"], ds.kstar_climatology)
+        if split == "test" and len(aux):
+            # DR-06 power errors / capacity and FR-06/DR-08 errors at 1, 6, 24 h (evaluation.py)
+            cs = aux[..., AUX_GHI_CS]
+            ghi["extras"] = evaluation.solar_extras(
+                forecast_ghi(np.asarray(preds, float).reshape(cs.shape), cs, mean, std, solar["target_kind"],
+                             solar["kstar_max"]),
+                aux[..., AUX_GHI], kstar_to_ghi(aux[..., AUX_KSTAR_LAST], cs, solar["kstar_max"]),
+                aux[..., AUX_DAYLIGHT] > 0.5)
         out[split] = (loss, mae, rmse, time.time() - start, ghi)
         sizes[split] = len(ds)
         logging.info(f"[CLIENT {pid}] Solar {split}: daylight MAE={ghi['model']['mae']:.1f} W/m2, "
@@ -317,6 +341,7 @@ def _evaluate_solar(msg, model, device, pid, bs, configs, dataset_name, data_fil
         "climatology_mae_real": t["climatology"]["mae"], "climatology_rmse_real": t["climatology"]["rmse"],
         "num-val-examples": sizes["val"],
         "num-test-examples": sizes["test"],
+        **{k: float(v) for k, v in t.get("extras", {}).items()},
     })
     return Message(content=RecordDict({"metrics": metrics, "client": _who(context)}), reply_to=msg)
 

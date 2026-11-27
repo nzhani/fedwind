@@ -13,7 +13,6 @@ import tempfile
 import subprocess
 import shutil
 
-import numpy as np
 import pandas as pd
 
 from app.schemas import FederatedTrainingInput, FederatedTrainingOutput

@@ -139,6 +139,9 @@ def start_background() -> bool:
         while True:
             try:
                 tick()
+                from app.services.health import beat
+
+                beat("scheduler")
             except Exception as e:  # never kill the API; the next tick tries again
                 log.warning("scheduler: %s: %s", type(e).__name__, e)
             wait.wait(TICK_S)

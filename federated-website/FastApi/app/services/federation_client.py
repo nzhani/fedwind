@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 import yaml
 
-from app.platform_schemas import EnergyType, FederationStatus
+from app.platform_schemas import FederationStatus
 from app.services.site_registry import list_sites
 from app.settings import get_settings
 

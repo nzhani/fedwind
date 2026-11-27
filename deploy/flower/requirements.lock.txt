@@ -86,3 +86,4 @@ uvloop==0.23.0
 watchfiles==1.3.0
 wcwidth==0.9.4
 websockets==17.4
+statsmodels==0.14.5  # ARIMA baseline (Long-term_Forecasting/flower_app/baselines)

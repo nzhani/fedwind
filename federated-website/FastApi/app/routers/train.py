@@ -37,7 +37,7 @@ def _run_training_job(job_id: str, filename: str, config):
 )
 async def train(request: TrainRequest):
     # Basic validation before spawning thread
-    import os, csv
+    import os
     from app.services.training_service import UPLOAD_DIR, validate_csv, validate_config
 
     file_path = os.path.abspath(os.path.join(UPLOAD_DIR, request.filename))

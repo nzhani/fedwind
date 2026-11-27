@@ -71,6 +71,7 @@ class Agent:
         self.status_port = int(env.get("STATUS_PORT", "8080") or 0)
         self.last_heartbeat: Optional[datetime] = None
         self.last_error: Optional[str] = None
+        self.update: Optional[dict] = None          # newer kit announced by the platform (M8)
         self.status = "unknown"
         self.last_quality_day: Optional[str] = None
         self.last_window_end = None
@@ -171,9 +172,24 @@ class Agent:
         self.last_heartbeat = datetime.now(timezone.utc)
         if answer.get("status") != self.status:
             log.info("site status: %s", answer.get("status"))
+        update = answer.get("update")
+        if update and update != self.update:
+            log.warning("a newer site kit is available (%s): %s", update.get("version"), update.get("how"))
+        self.update = update
         self.status = answer.get("status", self.status)
         self.heartbeat_s = int(answer.get("heartbeat_s", self.heartbeat_s))
+        self._follow_consents(answer.get("consents"))
         return answer
+
+    def _follow_consents(self, consents) -> None:
+        """Consents changed on the website (e.g. stop sharing the forecast window) reach the plant here."""
+        if not isinstance(consents, dict):
+            return
+        cfg = self.site_config()
+        if cfg and cfg.get("consents") != consents:
+            cfg["consents"] = consents
+            keys.write_file(self.secrets / "site.json", json.dumps(cfg, indent=2).encode(), 0o644)
+            log.info("consents updated from the platform: %s", consents)
 
     def daily_quality(self, now: Optional[datetime] = None) -> list:
         """Once per UTC day (and at start): counts for the 7 days ending at the newest data day.
@@ -207,8 +223,23 @@ class Agent:
 
     # -- main loop ------------------------------------------------------------------------------
 
+    RENEW_DAYS = 30
+
+    def maybe_renew(self) -> bool:
+        """30 days before the certificate expires: new key, CSR, POST /site-api/renew with the current
+        certificate. Returns True when renewed. Failures are retried at the next step."""
+        days = keys.certificate_days_left(self.secrets)
+        if days is None or days > self.RENEW_DAYS:
+            return False
+        csr = keys.renewal_csr(self.secrets, self.site_id)
+        body = self._post("/site-api/renew", {"csr": csr})
+        keys.install_renewed(self.secrets, body["certificate"], body.get("ca_certificate"))
+        log.info("certificate renewed, valid %.0f days", keys.certificate_days_left(self.secrets))
+        return True
+
     def step(self) -> None:
         self.heartbeat()
+        self.maybe_renew()
         self.daily_quality()
         self.forecast_window()
 

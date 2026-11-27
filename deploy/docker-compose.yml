@@ -77,6 +77,9 @@ services:
       SITE_AUTH_MODE: ${SITE_AUTH_MODE:-token}
       HEARTBEAT_S: ${HEARTBEAT_S:-30}
       SITE_API_PUBLIC_URL: ${PUBLIC_API_URL:-http://localhost:8001}
+      # Images new kits use (deploy/publish_images.sh); empty = locally built images
+      KIT_AGENT_IMAGE: ${KIT_AGENT_IMAGE:-}
+      KIT_SUPERNODE_IMAGE: ${KIT_SUPERNODE_IMAGE:-}
       # Visitors come through the web server's /api forwarding (and maybe a Cloudflare tunnel):
       # take their address from CF-Connecting-IP / X-Forwarded-For for login throttling and the audit log
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
@@ -89,6 +92,9 @@ services:
       SITE_CA_DIR: /secrets/site-ca
       FLOWER_NODE_AUTH: ${FLOWER_NODE_AUTH:-off}
       GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET:-}
+      # Presentation laptop only: runs are played back, not trained (app/services/demo_runs.py)
+      DEMO_RUNS: ${DEMO_RUNS:-0}
+      DEMO_ROUND_SECONDS: ${DEMO_ROUND_SECONDS:-25}
     volumes:
       - ${FEDWIND_DATA:-./data}:/data
       - ./seed:/seed:ro

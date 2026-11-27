@@ -103,7 +103,8 @@ def test_heartbeat_quality_and_connection(db_client):
     assert beat(db_client, "fws_wrong").status_code == 401
     assert db_client.post("/site-api/heartbeat", json={}).status_code == 401
     r = beat(db_client, key, last_data_hour="2026-11-19T21:00:00Z", rows_today=21, gaps_today=0)
-    assert r.json() == {"status": "active", "heartbeat_s": 30}
+    assert {k: r.json()[k] for k in ("status", "heartbeat_s")} == {"status": "active", "heartbeat_s": 30}
+    assert r.json()["update"]["version"] == "0.3.0"                      # agent 0.1.0 is told to update
     beat(db_client, key)
     q = db_client.post("/site-api/quality", json={"day": "2026-11-19", "rows": 24, "gaps": 0},
                        headers={"Authorization": f"Bearer {key}"})
@@ -164,7 +165,7 @@ def test_runs_only_use_sites_that_can_train(db_client):
 def test_admin_overview_and_audit_filters(db_client):
     op = operator(db_client)
     waiting = db_client.post("/api/sites", json=WIND, headers=csrf(op)).json()["id"]
-    t = admin(db_client)
+    admin(db_client)
     assert db_client.get("/api/admin/overview").status_code == 200
     o = db_client.get("/api/admin/overview").json()
     assert o["tiles"]["waiting"] == 1 and o["tiles"]["active_sites"] == 10 and o["tiles"]["online_now"] == 0
@@ -280,3 +281,19 @@ def test_public_list_says_whose_forecasts_anyone_may_see(db_client):
     sites = {s["id"]: s for s in db_client.get("/api/sites").json()["sites"]}
     assert sites["almaty"]["forecast_public"] is True
     assert sites[site_id]["forecast_public"] is False                    # WIND did not consent to public forecasts
+
+
+def test_kit_connects_on_its_own(db_client, monkeypatch):
+    """A kit started with plain `docker compose up -d` reaches a server on the same computer, and uses
+    published images when the server names them."""
+    site_id, op = approved_plant(db_client)
+    files = kit(db_client, site_id, op)
+    assert "SITE_API_URL=http://host.docker.internal:8001" in files[".env"]          # not localhost
+    assert "host.docker.internal:host-gateway" in files["docker-compose.yml"]
+    assert "AGENT_IMAGE=fedwind-site-agent:0.3.0" in files[".env"] and "#   nasa_power" in files[".env"]
+
+    monkeypatch.setenv("SITE_API_PUBLIC_URL", "https://arqauquat.example.kz")
+    monkeypatch.setenv("KIT_AGENT_IMAGE", "ghcr.io/team/arqauquat-site-agent:0.3.0")
+    files = kit(db_client, site_id, op)
+    assert "SITE_API_URL=https://arqauquat.example.kz" in files[".env"]
+    assert "AGENT_IMAGE=ghcr.io/team/arqauquat-site-agent:0.3.0" in files[".env"]

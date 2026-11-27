@@ -7,7 +7,6 @@ import pytest
 
 from app.platform_schemas import EnergyType
 from app.services import scheduler
-from app.services.federation_client import get_federation
 from tests.conftest import FakeFederation
 
 

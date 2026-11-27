@@ -66,6 +66,25 @@ def new_enrollment_keys(secrets: Path, site_id: str) -> tuple[str, str]:
     return csr.public_bytes(serialization.Encoding.PEM).decode(), pub
 
 
+def renewal_csr(secrets: Path, site_id: str) -> str:
+    """A new TLS key (kept beside the current one until the new certificate arrives) and its CSR."""
+    tls = ec.generate_private_key(ec.SECP256R1())
+    write_file(secrets / (TLS_KEY + ".new"), tls.private_bytes(serialization.Encoding.PEM,
+                                                               serialization.PrivateFormat.PKCS8,
+                                                               serialization.NoEncryption()))
+    csr = (x509.CertificateSigningRequestBuilder()
+           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, site_id)]))
+           .sign(tls, hashes.SHA256()))
+    return csr.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def install_renewed(secrets: Path, cert_pem: str, ca_pem: Optional[str]) -> None:
+    """Swap in the new key and certificate (each replace is atomic; the kit's tunnel reloads when it
+    sees a matching pair)."""
+    os.replace(secrets / (TLS_KEY + ".new"), secrets / TLS_KEY)
+    save_certificate(secrets, cert_pem, ca_pem)
+
+
 def make_local_tls(secrets: Path, days: int = 365) -> None:
     """A one-off local CA and the tunnel's server certificate (names: tunnel, localhost). The CA key
     is never written: nothing else can be signed with it, and a new one is made with every kit."""

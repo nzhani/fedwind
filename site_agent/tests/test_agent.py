@@ -53,11 +53,13 @@ class FakePlatform:
         elif headers.get("Authorization") != "Bearer fws_key" or self.revoked:
             return Resp(401)
         if path == "/site-api/heartbeat":
-            return Resp(200, {"status": self.status, "heartbeat_s": 15})
+            return Resp(200, {"status": self.status, "heartbeat_s": 15, **({"update": self.update} if getattr(self, "update", None) else {})})
+        if path == "/site-api/renew":
+            return Resp(200, {"certificate": sign(json["csr"], days=90), "ca_certificate": "CA PEM\n"})
         return Resp(200, {"ok": True})
 
 
-def sign(csr_pem: str) -> str:
+def sign(csr_pem: str, days: int = 90) -> str:
     """A self-signed stand-in for the platform's CA: same subject and key as the CSR, 90 days."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -68,7 +70,7 @@ def sign(csr_pem: str) -> str:
     now = datetime.now(timezone.utc)
     cert = (x509.CertificateBuilder().subject_name(csr.subject).issuer_name(csr.subject)
             .public_key(csr.public_key()).serial_number(x509.random_serial_number())
-            .not_valid_before(now).not_valid_after(now + timedelta(days=90)).sign(ca, hashes.SHA256()))
+            .not_valid_before(now).not_valid_after(now + timedelta(days=days)).sign(ca, hashes.SHA256()))
     return cert.public_bytes(serialization.Encoding.PEM).decode()
 
 
@@ -357,3 +359,44 @@ def test_status_page_shows_state_without_secrets(tmp_path):
         server.shutdown()
     assert s["site_id"] == "zh-1" and s["enrolled"] is True and s["certificate_days_left"] > 89
     assert "fws_key" not in page and "PRIVATE" not in page and "zh-1" in page
+
+
+def test_certificate_is_renewed_thirty_days_before_it_expires(tmp_path):
+    from site_agent import keys
+
+    p = FakePlatform(mtls=True)
+    a = Agent({**kit(tmp_path), "SITE_AUTH_MODE": "mtls"}, session=p)
+    a.enroll()
+    assert a.maybe_renew() is False                                     # 90 days left
+    secrets = tmp_path / "secrets"
+    old_key = (secrets / "site-tls.key").read_text()
+    keys.save_certificate(secrets, sign(keys.renewal_csr(secrets, "zh-1"), days=20), None)  # pretend 20 days left
+    (secrets / "site-tls.key.new").rename(secrets / "site-tls.key")
+    assert a.maybe_renew() is True
+    assert keys.certificate_days_left(secrets) > 89 and (secrets / "site-tls.key").read_text() != old_key
+    assert not (secrets / "site-tls.key.new").exists()
+    assert p.calls[-1][0] == "/site-api/renew" and "cert" in p.tls[-1]
+
+
+def test_update_notice_reaches_the_status_page(tmp_path):
+    from site_agent import status
+
+    p = FakePlatform()
+    p.update = {"version": "0.4.0", "how": "docker compose pull && docker compose up -d"}
+    a = Agent(kit(tmp_path), session=p)
+    a.enroll()
+    a.heartbeat()
+    assert status.snapshot(a)["update_available"] == "0.4.0"
+
+
+def test_consent_changes_from_the_website_reach_the_plant(tmp_path):
+    import json as _json
+
+    p = FakePlatform()
+    a = Agent(kit(tmp_path), session=p)
+    a.enroll()
+    (tmp_path / "secrets" / "site.json").write_text(_json.dumps({"heartbeat_s": 15, "consents": {"train": True}}))
+    a._follow_consents({"train": True, "share_forecast_window": True})
+    assert a.site_config()["consents"]["share_forecast_window"] is True
+    a._follow_consents(None)                                     # older platforms send nothing: unchanged
+    assert a.site_config()["consents"]["share_forecast_window"] is True

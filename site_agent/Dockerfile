@@ -1,5 +1,5 @@
 # FedWind site agent (small: no torch). Build from the repo root:
-#   docker build -f site_agent/Dockerfile -t fedwind-site-agent:0.2.0 .
+#   docker build -f site_agent/Dockerfile -t fedwind-site-agent:0.3.0 .
 # The site kit's docker-compose.yml runs it with the kit's .env, ./secrets, ./data and the token.
 FROM python:3.12-slim
 

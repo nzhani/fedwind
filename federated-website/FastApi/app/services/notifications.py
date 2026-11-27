@@ -345,6 +345,9 @@ def start_background(interval_s: float = 5.0) -> Optional[threading.Thread]:
         while True:
             try:
                 tick(client())
+                from app.services.health import beat
+
+                beat("notifications")
             except DatabaseUnavailable:
                 pass
             except Exception as e:  # never let alerts take the API down

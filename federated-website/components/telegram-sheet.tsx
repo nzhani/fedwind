@@ -1,8 +1,10 @@
 "use client"
 
-// Telegram alerts panel (account menu): connect with a one-time t.me link, see the status, disconnect.
+// Telegram alerts panel (account menu): connect with a one-time t.me link, shown as a QR code to scan
+// with the phone (or opened on this computer), see the status, disconnect.
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import QRCode from "qrcode"
 import { BellRing, Send } from "lucide-react"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Pill } from "@/components/fw/button"
@@ -16,6 +18,8 @@ export function TelegramSheet({ open, onOpenChange, role }: { open: boolean; onO
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [waiting, setWaiting] = useState(false)
+  const [link, setLink] = useState<string | null>(null)
+  const [qr, setQr] = useState<string | null>(null)
   const poll = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = useCallback(async () => {
@@ -34,6 +38,8 @@ export function TelegramSheet({ open, onOpenChange, role }: { open: boolean; onO
     if (poll.current) clearInterval(poll.current)
     poll.current = null
     setWaiting(false)
+    setLink(null)
+    setQr(null)
   }
 
   useEffect(() => {
@@ -46,7 +52,10 @@ export function TelegramSheet({ open, onOpenChange, role }: { open: boolean; onO
     setBusy(true)
     try {
       const { url } = await linkTelegram()
-      window.open(url, "_blank", "noopener")
+      setLink(url)
+      // Scan with the phone camera: Telegram opens on the bot, Start links this account
+      setQr(await QRCode.toDataURL(url, { width: 440, margin: 1, errorCorrectionLevel: "M",
+                                          color: { dark: "#222222", light: "#ffffff" } }))
       setWaiting(true)
       const until = Date.now() + 15 * 60_000
       poll.current = setInterval(async () => {
@@ -114,13 +123,29 @@ export function TelegramSheet({ open, onOpenChange, role }: { open: boolean; onO
           ) : (
             <>
               <p className="text-[15px] leading-6 text-fw-muted">
-                Opens Telegram with <span className="font-medium text-ink">@{s.bot_username ?? "the ArqauQuat bot"}</span>. Press{" "}
-                <span className="font-medium text-ink">Start</span> there and this panel turns on by itself.
+                Shows a QR code for <span className="font-medium text-ink">@{s.bot_username ?? "the ArqauQuat bot"}</span>. Scan it with
+                your phone, press <span className="font-medium text-ink">Start</span> in Telegram, and this panel turns on by itself.
               </p>
-              <Pill icon={<Send className="h-4 w-4" />} loading={busy} onClick={connect} className="w-full">
-                {waiting ? "Waiting for Start in Telegram…" : "Connect Telegram"}
-              </Pill>
-              {waiting && <p className="text-sm text-fw-muted">The link works once, for 15 minutes.</p>}
+              {waiting && qr ? (
+                <div className="space-y-4">
+                  <div className="flex flex-col items-center gap-3 rounded-[12px] bg-paper-warm p-5">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={qr} alt="QR code that opens the ArqauQuat bot in Telegram" className="h-[220px] w-[220px] rounded-[8px]" />
+                    <p className="text-center text-sm text-fw-muted">
+                      Scan with your phone&apos;s camera, then press <span className="font-medium text-ink">Start</span> in Telegram.
+                    </p>
+                  </div>
+                  <Pill variant="outline" icon={<Send className="h-4 w-4" />} className="w-full"
+                        onClick={() => link && window.open(link, "_blank", "noopener")}>
+                    Open Telegram on this computer
+                  </Pill>
+                  <p className="text-sm text-fw-muted">Waiting for Start… The code works once, for 15 minutes.</p>
+                </div>
+              ) : (
+                <Pill icon={<Send className="h-4 w-4" />} loading={busy} onClick={connect} className="w-full">
+                  Connect Telegram
+                </Pill>
+              )}
             </>
           )}
           <div>

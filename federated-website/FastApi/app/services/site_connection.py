@@ -31,7 +31,7 @@ import threading
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, Optional
 from urllib.parse import urlparse
 
 from app.db import connect
@@ -98,10 +98,20 @@ def issue_kit(user: User, site_id: str, ip: Optional[str] = None) -> tuple[bytes
         return build_kit_zip(row, token, expires), f"fedwind-site-{site_id}.zip"
 
 
+def kit_site_api_url() -> str:
+    """The site API address written into kits. A server on the same computer (localhost) is reached
+    from inside the kit's containers as host.docker.internal, which the kit maps to this computer."""
+    url = os.environ.get("SITE_API_PUBLIC_URL", "http://localhost:8001").rstrip("/")
+    parsed = urlparse(url)
+    if parsed.hostname in ("localhost", "127.0.0.1", "::1"):
+        url = parsed._replace(netloc=parsed.netloc.replace(parsed.hostname, "host.docker.internal", 1)).geturl()
+    return url
+
+
 def build_kit_zip(site: dict, token: str, expires: datetime) -> bytes:
     """The final kit layout (SITE_NETWORK_PLAN.md §5.1). The tunnel and SuperNode join it in M4–M6."""
     sid = site["id"]
-    site_api = os.environ.get("SITE_API_PUBLIC_URL", "http://localhost:8001").rstrip("/")
+    site_api = kit_site_api_url()
     portal = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
     gateway_host = urlparse(site_api).hostname or "localhost"
     root = f"fedwind-site-{sid}"
@@ -121,10 +131,15 @@ def build_kit_zip(site: dict, token: str, expires: datetime) -> bytes:
         "# federation: also start the tunnel and the Flower SuperNode (needs the mTLS gateway)",
         f"COMPOSE_PROFILES={'federation' if os.environ.get('SITE_AUTH_MODE', 'token').lower() == 'mtls' else ''}",
         f"GATEWAY_HOST={gateway_host}",
-        "# The Flower image for training (GPU or CPU build) and the GPT-2 cache folder it reads",
-        "SUPERNODE_IMAGE=fedwind-flower:latest",
+        "# Images: downloaded by `docker compose up` when published to a registry (KIT_AGENT_IMAGE /",
+        "# KIT_SUPERNODE_IMAGE on the server); otherwise built locally from the repository",
+        f"AGENT_IMAGE={os.environ.get('KIT_AGENT_IMAGE') or 'fedwind-site-agent:0.3.0'}",
+        f"SUPERNODE_IMAGE={os.environ.get('KIT_SUPERNODE_IMAGE') or 'fedwind-flower:latest'}",
+        "# The GPT-2 cache folder the Flower client reads (training only)",
         "HF_CACHE=./hf-cache",
-        "# csv_inbox: the plant drops hourly exports into data/inbox (data/README.md)",
+        "# Where the plant's data comes from:",
+        "#   csv_inbox   a real plant: hourly exports dropped into data/inbox (data/README.md)",
+        "#   nasa_power  a demo plant: NASA POWER weather at this plant's coordinates (needs internet)",
         "DATA_SOURCE=csv_inbox",
         f"HEARTBEAT_S={heartbeat_seconds()}",
         "",
@@ -153,10 +168,11 @@ def build_kit_zip(site: dict, token: str, expires: datetime) -> bytes:
         ## Install
         1. Copy this folder to a Linux server or VM at the plant with Docker Engine and Compose v2.
            It needs outbound HTTPS to {site_api}. No inbound ports.
-        2. Put hourly exports into `data/inbox/` (format in `data/README.md`).
-        3. Start: `docker compose up -d`
+        2. Put hourly exports into `data/inbox/` (format in `data/README.md`). No data yet? The plant
+           still connects and shows Online; for a demo, set `DATA_SOURCE=nasa_power` in `.env`.
+        3. Start: `docker compose up -d` (the first start downloads the images if they are published)
         4. Check: `docker compose logs -f agent` shows "enrolled as {sid}", and the plant page at
-           {portal}/sites/{sid} turns **Online** within a minute.
+           {portal}/sites/{sid} turns **Online** within a minute. Local status page: http://localhost:8080
 
         The token is used once. If the kit is lost or the server is replaced, ask the ArqauQuat team to
         re-issue it; the old credentials stop working.
@@ -196,6 +212,9 @@ def build_kit_zip(site: dict, token: str, expires: datetime) -> bytes:
         z.writestr(f"{root}/docker-compose.yml", compose)
         z.writestr(f"{root}/docker-compose.gpu.yml", (KIT_DIR / "docker-compose.gpu.yml").read_text())
         z.writestr(f"{root}/tunnel.conf.template", (KIT_DIR / "tunnel.conf.template").read_text())
+        reload = zipfile.ZipInfo(f"{root}/tunnel-reload.sh")
+        reload.external_attr = 0o755 << 16           # executable after unzip (nginx runs only executable hooks)
+        z.writestr(reload, (KIT_DIR / "tunnel-reload.sh").read_text())
         z.writestr(f"{root}/.env", env)
         z.writestr(f"{root}/enrollment.token", token + "\n")
         z.writestr(f"{root}/ca.crt", site_ca.ca_cert_pem())
@@ -285,6 +304,9 @@ def start_maintenance() -> bool:
         wait = threading.Event()  # never set: an interruptible sleep
         while True:
             apply_revocations()
+            from app.services.health import beat
+
+            beat("site maintenance")
             wait.wait(MAINTENANCE_S)
 
     threading.Thread(target=loop, name="site-maintenance", daemon=True).start()
@@ -408,6 +430,34 @@ def enroll(token: str, agent_kind: str, agent_version: str, flower_public_key: O
     return result
 
 
+RENEW_BEFORE = timedelta(days=30)
+
+
+def renew_certificate(caller: SiteCaller, csr: str, ip: Optional[str] = None) -> dict:
+    """A plant renews its client certificate before it expires (SITE_NETWORK_PLAN.md M8, §6), calling
+    with its current, still valid credential. The new certificate replaces the old one on the
+    credential at once, so the API accepts only the new serial; the old one runs out on its own
+    (and Flower still needs the registered node key)."""
+    if caller.status not in ("active", "suspended"):
+        raise AccountError(409, f"The site is {caller.status}; it can't renew its certificate")
+    with connect() as conn:
+        cred = conn.execute("SELECT * FROM site_credentials WHERE id = %s AND revoked_at IS NULL FOR UPDATE",
+                            (caller.credential_id,)).fetchone()
+        if cred is None or not cred["cert_serial"]:
+            raise AccountError(409, "This site has no certificate to renew; enroll with a new kit")
+        try:
+            issued = site_ca.sign_csr(csr, caller.site_id)
+        except site_ca.CsrError as e:
+            raise AccountError(422, str(e))
+        conn.execute("UPDATE site_credentials SET cert_serial = %s, cert_not_after = %s WHERE id = %s",
+                     (issued.serial, issued.not_after, cred["id"]))
+        audit(conn, "site.renew", actor_type="site", actor_id=caller.site_id, target=caller.site_id, ip=ip,
+              details={"old_serial": cred["cert_serial"], "new_serial": issued.serial,
+                       "not_after": issued.not_after.isoformat()})
+    return {"certificate": issued.pem, "ca_certificate": site_ca.ca_cert_pem(),
+            "certificate_expires_at": issued.not_after.isoformat()}
+
+
 def _caller(row: Optional[dict]) -> Optional[SiteCaller]:
     if row is None:
         return None
@@ -461,7 +511,28 @@ def heartbeat(caller: SiteCaller, body) -> dict:
                   details={"agent_kind": body.agent_kind, "agent_version": body.agent_version})
         conn.execute("DELETE FROM site_heartbeats WHERE site_id = %s AND at < now() - %s",
                      (caller.site_id, HEARTBEAT_HISTORY))
-    return {"status": caller.status, "heartbeat_s": heartbeat_seconds()}
+    with connect() as conn:
+        consents = conn.execute("SELECT consents FROM sites WHERE id = %s", (caller.site_id,)).fetchone()["consents"]
+    # The agent follows consent changes made on the website (sharing the window, training paused)
+    answer = {"status": caller.status, "heartbeat_s": heartbeat_seconds(), "consents": consents or {}}
+    update = kit_update(body.agent_version)
+    if update:
+        answer["update"] = update
+    return answer
+
+
+def latest_agent_version() -> str:
+    """The newest site kit; set KIT_LATEST_VERSION when a new agent image is published."""
+    return os.environ.get("KIT_LATEST_VERSION", "0.3.0")
+
+
+def kit_update(agent_version: Optional[str]) -> Optional[dict]:
+    """Update notice for an older agent (M8): shown on the plant page, sent in the heartbeat answer."""
+    latest = latest_agent_version()
+    if not agent_version or _version(agent_version) >= _version(latest):
+        return None
+    return {"version": latest, "how": "in the kit folder: docker compose pull && docker compose up -d "
+                                      "(set AGENT_IMAGE in .env if the image name changed)"}
 
 
 def record_quality(caller: SiteCaller, body) -> dict:
@@ -548,6 +619,19 @@ def central_forecast_request(site_id: str, hours: int) -> dict:
         "public": bool(consents.get("public_forecasts")),
         "org_id": row["org_id"],
     }
+
+
+def plant_consents(site_id: str) -> dict:
+    with connect() as conn:
+        row = conn.execute("SELECT consents FROM sites WHERE id = %s", (site_id,)).fetchone()
+    return (row["consents"] or {}) if row else {}
+
+
+def plant_is_simulated(site_id: str) -> bool:
+    with connect() as conn:
+        row = conn.execute("SELECT agent_kind FROM site_credentials WHERE site_id = %s AND revoked_at IS NULL",
+                           (site_id,)).fetchone()
+    return bool(row and row["agent_kind"] == "simulated")
 
 
 def plant_visibility(site_id: str) -> tuple[Optional[int], bool]:
@@ -667,6 +751,7 @@ def connections(conn, rows: Iterable[dict], with_quality: bool = False) -> Dict[
             gaps_today=b["gaps_today"] if b else None,
             heartbeat_s=hb_s,
             train_hours=(b["payload"] or {}).get("train_hours") if b else None,
+            update_available=(kit_update(c["agent_version"]) or {}).get("version") if c else None,
             quality_7d=quality.get(r["id"], []),
         )
     return out

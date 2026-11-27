@@ -9,8 +9,10 @@ name: fedwind-site-{{SITE_ID}}
 
 services:
   agent:
-    image: ${AGENT_IMAGE:-fedwind-site-agent:0.2.0}
+    image: ${AGENT_IMAGE:-fedwind-site-agent:0.3.0}
     env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # a server on this same computer (development, demos)
     volumes:
       - ./secrets:/secrets          # keys made here at enrollment and the certificates (keep private)
       - ./data:/data                # inbox/ for exports, store/ for the hourly table
@@ -34,6 +36,7 @@ services:
       GATEWAY_CA_FILE: ${GATEWAY_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
     volumes:
       - ./tunnel.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./tunnel-reload.sh:/docker-entrypoint.d/90-tunnel-reload.sh:ro   # picks up renewed certificates
       - ./secrets:/pki:ro
     depends_on:
       agent:

@@ -257,6 +257,58 @@ def update_registration(user: User, site_id: str, req: SiteRegistration, ip: Opt
         return _full_detail(conn, site_id)
 
 
+def _manage(user: User, conn, site_id: str) -> dict:
+    """The plant row if this user may manage it (its organization's operator, or an admin)."""
+    row = conn.execute(_SELECT + "WHERE s.id = %s FOR UPDATE OF s", (site_id,)).fetchone()
+    if not _visible(user, row) or row["kind"] != "plant" or user.role not in ("operator", "admin"):
+        raise AccountError(404, "Site not found")
+    return row
+
+
+def update_consents(user: User, site_id: str, req, ip: Optional[str] = None) -> SiteDetail:
+    """Pause or resume training, start or stop sharing the forecast window, public forecasts on or off.
+    The plant's agent learns the change with its next heartbeat. Stopping the window deletes the
+    windows already shared (they were kept only for central forecasts)."""
+    _require_db()
+    with connect() as conn:
+        row = _manage(user, conn, site_id)
+        if row["status"] not in ("approved", "active", "suspended"):
+            raise AccountError(409, f"The plant is {row['status']}")
+        before = row["consents"] or {}
+        after = {**before, **req.model_dump()}
+        conn.execute("UPDATE sites SET consents = %s, updated_at = now() WHERE id = %s", (json.dumps(after), site_id))
+        if before.get("share_forecast_window") and not after["share_forecast_window"]:
+            conn.execute("DELETE FROM forecast_inputs WHERE site_id = %s", (site_id,))
+            conn.execute("DELETE FROM forecasts WHERE site_id = %s AND source = 'central'", (site_id,))
+        changed = {k: [before.get(k), v] for k, v in req.model_dump().items() if before.get(k) != v}
+        audit(conn, "site.consents", actor_type="user", actor_id=user.id, target=site_id, details=changed, ip=ip)
+        return _full_detail(conn, site_id)
+
+
+def leave(user: User, site_id: str, note: Optional[str], ip: Optional[str] = None) -> SiteDetail:
+    """The operator takes the plant out of the federation for good: credentials revoked (certificate
+    on the CRL, Flower node unregistered), shared windows deleted. Final, like an admin revoke."""
+    _require_db()
+    note = (note or "").strip() or "Left the federation"
+    with connect() as conn:
+        row = _manage(user, conn, site_id)
+        if row["status"] in ("rejected", "revoked"):
+            raise AccountError(409, f"The plant is already {row['status']}")
+        from app.services.site_connection import revoke_credentials
+
+        conn.execute("UPDATE sites SET status = 'revoked', decision_note = %s, decided_by = %s, decided_at = now(),"
+                     " updated_at = now() WHERE id = %s", (note, user.id, site_id))
+        revoked = revoke_credentials(conn, site_id)
+        conn.execute("DELETE FROM forecast_inputs WHERE site_id = %s", (site_id,))
+        audit(conn, "site.leave", actor_type="user", actor_id=user.id, target=site_id,
+              details={"from": row["status"], "note": note, "credentials_revoked": revoked}, ip=ip)
+        detail = _full_detail(conn, site_id)
+    from app.services.site_connection import apply_revocations
+
+    apply_revocations()
+    return detail
+
+
 def decide(admin: User, site_id: str, action: str, note: Optional[str], ip: Optional[str] = None) -> SiteDetail:
     """Admin decision on a site: approve, reject, suspend, resume, revoke."""
     _require_db()

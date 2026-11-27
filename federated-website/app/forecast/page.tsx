@@ -317,6 +317,12 @@ function ForecastView({
 
   return (
     <div className="space-y-8">
+      {data.summary && (
+        <p className="mb-4 rounded-[12px] bg-paper-warm px-4 py-3 text-[15px] leading-6 text-ink">
+          {data.summary.text}
+          <span className="ml-2 text-xs text-fw-muted">{data.summary.source === "claude" ? "Summary written by Claude" : "Summary"}</span>
+        </p>
+      )}
       <ModelCard data={data} now={now} />
 
       <StatRow className="mb-0">
@@ -427,7 +433,10 @@ function ForecastView({
         <p className="mt-4 text-sm leading-5 text-fw-muted">
           {data.source === "central"
             ? `Forecast on the ArqauQuat server from the last hours of ${e === "wind" ? "wind speed" : "irradiance"} this plant shares for central forecasting. `
-            : "Lab site: forecast next to its data, as a plant with its own inference would. "}
+            : data.source === "local"
+              ? "Forecast made at the plant with the downloaded model; the plant keeps its data and sent only this forecast. "
+              : "Lab site: forecast next to its data, as a plant with its own inference would. "}
+          {data.stored_at ? `Updated ${relTime(data.stored_at)}. ` : ""}
           {e === "wind"
             ? data.power_basis === "plant"
               ? "Power from the plant's turbines (count × rated power, generic power curve)."
@@ -503,7 +512,7 @@ function ModelCard({ data, now }: { data: ForecastResponse; now: number }) {
                 Demo model · {m.data_percent} % of the data
               </StatusPill>
             )}
-            <StatusPill tone="accent">Serving forecasts</StatusPill>
+            <StatusPill tone="accent">{m.version ? `v${m.version} · ` : ""}Serving forecasts</StatusPill>
           </div>
           <span className="text-sm text-fw-muted">
             promoted {relTime(m.promoted_at, now)}

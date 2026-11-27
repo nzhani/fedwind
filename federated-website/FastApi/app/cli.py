@@ -7,6 +7,12 @@ Admin commands for the platform database (run inside the api container).
   python -m app.cli set-password --email someone@org.kz
   python -m app.cli list-users
   python -m app.cli demo-reset [--yes] [--promote <run_id> ...] [--keep <site_id> ...]   local demo only
+  python -m app.cli sim-plants spawn --count 20 --energy wind --out /data/sim-kits   test servers only (M9)
+  python -m app.cli sim-plants status
+  python -m app.cli sim-plants join --site <id>        dev mode: this plant's Flower client runs here
+  python -m app.cli start-run --energy wind --rounds 3 --horizon 1 [--data-percent 5] [--min-clients 15]
+  python -m app.cli run-status <run_id> [--json]
+  python -m app.cli import-run /data/import/<run folder> [--run-id ID] [--promote]   runs trained elsewhere
 
 Passwords are typed at a hidden prompt, or read from FEDWIND_NEW_PASSWORD for scripted setups;
 never as a command-line argument (it would land in shell history and `ps`).
@@ -60,6 +66,30 @@ def main(argv=None) -> None:
                    help="promote this finished run afterwards (repeatable), e.g. the demo's run A")
     d.add_argument("--keep", action="append", default=[], metavar="SITE_ID",
                    help="keep this plant with its organization and that organization's accounts (repeatable)")
+    sp = sub.add_parser("sim-plants", help="simulated plants for scale tests (not on production)")
+    sp.add_argument("action", choices=["spawn", "status", "join", "leave"])
+    sp.add_argument("--site", help="join/leave: the plant whose Flower client runs on this computer (dev mode)")
+    sp.add_argument("--count", type=int, default=20)
+    sp.add_argument("--energy", choices=["wind", "solar"], default="wind")
+    sp.add_argument("--out", default="/data/sim-kits")
+    sp.add_argument("--no-window", action="store_true", help="plants keep their window (local forecasting)")
+    sr = sub.add_parser("start-run", help="start a federated run on every site that can train")
+    sr.add_argument("--energy", choices=["wind", "solar"], default="wind")
+    sr.add_argument("--rounds", type=int, default=3)
+    sr.add_argument("--horizon", type=int, default=1)
+    sr.add_argument("--local-epochs", type=int, default=1)
+    sr.add_argument("--data-percent", type=int, default=100)
+    sr.add_argument("--min-clients", type=int, default=2)
+    sr.add_argument("--round-timeout", type=int, default=1800)
+    sr.add_argument("--sites", default="", help="comma-separated (default: every site that can train now)")
+    ir = sub.add_parser("import-run", help="add a run trained elsewhere (e.g. Irgetas) to the website")
+    ir.add_argument("folder", help="the run folder (result.json, checkpoints/, metrics.jsonl), inside the container")
+    ir.add_argument("--run-id", default=None)
+    ir.add_argument("--note", default=None)
+    ir.add_argument("--promote", action="store_true", help="also make it the model that serves forecasts")
+    rs = sub.add_parser("run-status", help="a run's state and per-round participation")
+    rs.add_argument("run_id")
+    rs.add_argument("--json", action="store_true")
     c = sub.add_parser("site-ca", help="site CA: create it, show it, re-publish the CRL")
     c.add_argument("action", choices=["init", "show", "crl"])
     args = p.parse_args(argv)
@@ -81,6 +111,14 @@ def main(argv=None) -> None:
             u = _user_by_email(args.email)
             accounts.set_password(u.id, _password())
             print(f"password changed for {u.email}; their sessions were closed")
+        elif args.cmd == "sim-plants":
+            sim_plants_command(args)
+        elif args.cmd == "start-run":
+            start_run_command(args)
+        elif args.cmd == "import-run":
+            import_run_command(args)
+        elif args.cmd == "run-status":
+            run_status_command(args.run_id, args.json)
         elif args.cmd == "site-ca":
             site_ca_command(args.action)
         elif args.cmd == "demo-reset":
@@ -90,6 +128,94 @@ def main(argv=None) -> None:
                 print(f"{u.id:>4}  {u.role:<8}  {'active' if u.active else 'disabled':<8}  {u.email}  {u.org_name or ''}")
     except AccountError as e:
         sys.exit(e.message)
+
+
+def sim_plants_command(args) -> None:
+    from pathlib import Path
+
+    from app.services import sim_plants
+
+    migrate()
+    if args.action in ("join", "leave"):
+        if not args.site:
+            sys.exit("--site is required")
+        r = sim_plants.set_joined(args.site, args.action == "join")
+        print(f"{r['site_id']}: {'can be selected for training runs' if r['joined'] else 'left training'}")
+        return
+    if args.action == "spawn":
+        for p in sim_plants.spawn(args.count, args.energy, Path(args.out), share_window=not args.no_window):
+            print(f"{p['site_id']}\t{p['kit']}")
+    else:
+        rows = sim_plants.status()
+        for r in rows:
+            print(f"{r['site_id']:<40} {r['energy']:<6} {r['status']:<10} {r['connection'] or '-':<8} "
+                  f"hours={r['train_hours'] or 0:<6} {'CAN TRAIN' if r['can_train'] else r['why_not']}")
+        print(f"{sum(r['can_train'] for r in rows)} of {len(rows)} can train")
+
+
+def start_run_command(args) -> None:
+    from app.platform_schemas import ExperimentConfig
+    from app.services import run_launcher
+    from app.services.federation_client import get_federation
+    from app.settings import get_settings
+
+    config = ExperimentConfig(energy_type=args.energy, rounds=args.rounds, horizon=args.horizon,
+                              local_epochs=args.local_epochs, data_percent=args.data_percent,
+                              min_train_clients=args.min_clients, round_timeout_s=args.round_timeout,
+                              sites=[s for s in args.sites.split(",") if s] or None)
+    try:
+        run = run_launcher.launch(get_settings(), config, get_federation())
+    except run_launcher.LaunchError as e:
+        sys.exit(f"not started ({e.status}): {e.message}")
+    with accounts.connect() as conn:
+        accounts.audit(conn, "run.start", target=run.run_id, details={"via": "cli", "sites": run.config.get("sites")})
+    print(run.run_id)
+
+
+def import_run_command(args) -> None:
+    from pathlib import Path
+
+    from app.services import model_registry, run_import
+    from app.settings import get_settings
+
+    settings = get_settings()
+    run = run_import.import_run(settings, Path(args.folder), args.run_id, args.note)
+    real = ((run.result or {}).get("metrics") or {}).get("real") or {}
+    print(f"imported {run.run_id}: {run.config.get('energy_type')} {run.horizon} h, {len(run.sites)} sites,"
+          f" {run.current_round} rounds, skill {real.get('skill_vs_persistence')}")
+    with accounts.connect() as conn:
+        accounts.audit(conn, "run.import", target=run.run_id, details={"from": args.folder, "via": "cli"})
+    if args.promote:
+        m = model_registry.promote(settings, run, promoted_by="import (cli)")
+        print(f"promoted: {m.energy_type.value} {m.horizon} h" + (f" v{m.version}" if m.version else ""))
+
+
+def run_status_command(run_id: str, as_json: bool) -> None:
+    import json
+
+    from app.services import run_store
+    from app.settings import get_settings
+
+    run = run_store.get_run(get_settings(), run_id)
+    if run is None:
+        sys.exit(f"no run {run_id}")
+    rounds = []
+    for h in run.history:
+        counts = {}
+        for c in h.clients:
+            counts[c.status] = counts.get(c.status, 0) + 1
+        rounds.append({"round": h.round, "duration_s": h.duration_s, "uplink_bytes": h.uplink_bytes, **counts,
+                       "rejected_sites": [c.site for c in h.clients if c.status == "rejected"],
+                       "dropped_sites": [c.site for c in h.clients if c.status == "dropped"]})
+    out = {"run_id": run.run_id, "status": run.status, "round": run.current_round, "total_rounds": run.total_rounds,
+           "sites": len(run.sites), "rounds": rounds}
+    if as_json:
+        print(json.dumps(out, indent=2))
+        return
+    print(f"{run.run_id}: {run.status}, round {run.current_round}/{run.total_rounds}, {len(run.sites)} sites")
+    for r in rounds:
+        print(f"  round {r['round']}: replied {r.get('replied', 0)}, dropped {r.get('dropped', 0)}"
+              f" {r['dropped_sites'] or ''}, rejected {r.get('rejected', 0)} {r['rejected_sites'] or ''}")
 
 
 def site_ca_command(action: str) -> None:

@@ -16,7 +16,7 @@ docker compose -f "$dest/docker-compose.yml" -f "$REPO/deploy/sim/compose.sim.ym
 if [[ "${2:-}" == "--forget" ]]; then
   # Plants started before the agent ran as your user left root-owned files: remove those in a container
   rm -rf "$dest" 2>/dev/null || {
-    docker run --rm -v "$dest":/site --entrypoint sh fedwind-site-agent:0.2.0 -c 'rm -rf /site/* /site/.[!.]*'
+    docker run --rm -v "$dest":/site --entrypoint sh fedwind-site-agent:0.3.0 -c 'rm -rf /site/* /site/.[!.]*'
     rm -rf "$dest"
   }
   echo "Removed $dest"

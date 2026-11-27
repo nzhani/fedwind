@@ -1,12 +1,9 @@
 import os
 import numpy as np
 import pandas as pd
-import os
-import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
 
-from torch.utils.data import random_split, DataLoader
 import warnings
 from pathlib import Path
 import sys
@@ -19,14 +16,12 @@ _project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_project_root))
 
 from utils.timefeatures import time_features
-from utils.tools import convert_tsf_to_dataframe
 
 warnings.filterwarnings('ignore')
 
 
 def preprocess_nasa_data(file_path, target_column='WS50M'):
     import pandas as pd
-    import numpy as np
 
     # 1) Find the first data/header line after "-END HEADER-"
     with open(file_path, 'r', errors='ignore') as f:
@@ -115,7 +110,7 @@ def get_chunked_dataset(files_to_process, chunk_size):
         files_to_process[i] = preprocess_nasa_data(files_to_process[i])
         num_chunks = min(num_chunks, len(files_to_process[i]) // chunk_size)
         if num_chunks == 0:
-            logging.info(f"   -> Not enough data for even one chunk. Skipping.")
+            logging.info("   -> Not enough data for even one chunk. Skipping.")
 
     # Loop through and extract each chunk
     for i in range(num_chunks):

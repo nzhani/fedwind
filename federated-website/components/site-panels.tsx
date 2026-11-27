@@ -8,6 +8,7 @@ import { Check, Copy, Download, Minus } from "lucide-react"
 import { Card, DefList } from "@/components/fw/surface"
 import { Pill, TextAction } from "@/components/fw/button"
 import { ConfirmWithReason, Notice, Skeleton, toast } from "@/components/fw/feedback"
+import { Switch } from "@/components/fw/form"
 import { StatusPill } from "@/components/fw/status"
 import { fmtDate, fmtDateTime, fmtPct, fmtPower, relTime } from "@/components/fw/format"
 import { cn } from "@/lib/utils"
@@ -15,6 +16,9 @@ import {
   DATA_SOURCES,
   decideSite,
   downloadKit,
+  leaveFederation,
+  updateConsents,
+  type ConsentUpdate,
   getForecast,
   listModels,
   pointPower,
@@ -184,6 +188,12 @@ export function ConnectionCard({ site, now }: { site: SiteDetail; now: number })
         ) : undefined
       }
     >
+      {c.update_available && (
+        <Notice title={`Site kit ${c.update_available} is available`} className="mb-5">
+          In the kit folder on the plant&apos;s server run <span className="fw-num">docker compose pull &amp;&amp; docker compose up -d</span>.
+          The plant keeps its keys and data.
+        </Notice>
+      )}
       {offline && (
         <Notice tone="warn" title={`No heartbeat for ${relTime(c.last_heartbeat_at, now).replace(" ago", "")}`} className="mb-5">
           Check that the plant&apos;s computer is on and can reach ArqauQuat. Nothing is lost: the plant keeps its data.
@@ -358,23 +368,88 @@ export function ActivityCard({ site, now }: { site: SiteDetail; now: number }) {
   )
 }
 
-export function ConsentsCard({ site }: { site: SiteDetail }) {
+const CONSENT_ROWS: { key: keyof ConsentUpdate; label: string; on: string; off: string }[] = [
+  { key: "train", label: "Federated training", on: "Joins training runs", off: "Paused: joins no training run" },
+  { key: "share_forecast_window", label: "Central forecasting", on: "Shares the last 14 days of one variable",
+    off: "Shares nothing; forecasts at the plant" },
+  { key: "public_forecasts", label: "Public forecasts", on: "Visitors see this plant's forecasts", off: "Private" },
+]
+
+/** Consents; the plant's operators (and admins) change them here while the plant takes part. */
+export function ConsentsCard({ site, editable = false, onChanged }: {
+  site: SiteDetail
+  editable?: boolean
+  onChanged?: (s: SiteDetail) => void
+}) {
   const c = (site.consents ?? {}) as Record<string, unknown>
-  const rows: [string, boolean][] = [
-    ["Federated training", Boolean(c.train)],
-    ["Central forecasting", Boolean(c.share_forecast_window)],
-    ["Public forecasts", Boolean(c.public_forecasts)],
-  ]
+  const [busy, setBusy] = useState<string | null>(null)
+  const [leaving, setLeaving] = useState(false)
+  const canChange = editable && ["approved", "active", "suspended"].includes(site.status)
+
+  const toggle = async (key: keyof ConsentUpdate, value: boolean) => {
+    if (key === "share_forecast_window" && !value &&
+        !window.confirm("Stop sharing? The windows already shared are deleted and central forecasts stop.")) return
+    setBusy(key)
+    try {
+      const next = { train: Boolean(c.train), share_forecast_window: Boolean(c.share_forecast_window),
+                     public_forecasts: Boolean(c.public_forecasts), [key]: value }
+      onChanged?.(await updateConsents(site.id, next))
+      toast.success(key === "train" ? (value ? "Training resumed" : "Training paused") : "Consent updated")
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not update the consent")
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const leave = async (reason: string) => {
+    setBusy("leave")
+    try {
+      onChanged?.(await leaveFederation(site.id, reason))
+      toast.success("The plant has left the federation")
+      setLeaving(false)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not leave")
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
-    <Card title="Consents">
-      <ul className="space-y-2.5">
-        {rows.map(([label, on]) => (
-          <li key={label} className="flex items-center justify-between text-sm">
-            <span className={on ? "text-ink" : "text-fw-muted"}>{label}</span>
-            {on ? <Check className="h-4 w-4 text-ink" aria-label="yes" /> : <Minus className="h-4 w-4 text-fw-muted" aria-label="no" />}
-          </li>
-        ))}
+    <Card title={canChange ? "Participation" : "Consents"}>
+      <ul className="space-y-3">
+        {CONSENT_ROWS.map((r) => {
+          const on = Boolean(c[r.key])
+          return (
+            <li key={r.key} className="flex items-center justify-between gap-3 text-sm">
+              <div className="min-w-0">
+                <div className={on ? "text-ink" : "text-fw-muted"}>{r.label}</div>
+                {canChange && <div className="text-xs text-fw-muted">{on ? r.on : r.off}</div>}
+              </div>
+              {canChange ? (
+                <Switch checked={on} disabled={busy !== null} label={r.label} onChange={(v) => toggle(r.key, v)} />
+              ) : on ? (
+                <Check className="h-4 w-4 text-ink" aria-label="yes" />
+              ) : (
+                <Minus className="h-4 w-4 text-fw-muted" aria-label="no" />
+              )}
+            </li>
+          )
+        })}
       </ul>
+      {canChange && (
+        <div className="mt-5 border-t border-line pt-4">
+          {leaving ? (
+            <ConfirmWithReason action="Leave for good" busy={busy === "leave"} placeholder="Why the plant leaves"
+              onCancel={() => setLeaving(false)} onConfirm={leave} />
+          ) : (
+            <TextAction onClick={() => setLeaving(true)}>Leave the federation</TextAction>
+          )}
+          <p className="mt-2 text-xs text-fw-muted">
+            Final: the plant&apos;s certificate and Flower node stop working. To pause, switch training off instead.
+          </p>
+        </div>
+      )}
     </Card>
   )
 }

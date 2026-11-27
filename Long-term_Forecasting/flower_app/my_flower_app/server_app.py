@@ -1,16 +1,14 @@
 
 """my-flower-app: A Flower / PyTorch app."""
-import copy
 import json
 import pickle
 import torch
 import pandas as pd
 import time
-import sys
 import numpy as np
 from datetime import datetime
 from collections import defaultdict
-from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
+from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 
@@ -219,7 +217,7 @@ class FedAvgWithMetrics(FedAvg):
                     "train_duration_sec": float(train_duration) if train_duration is not None else None,
                 })
             else:
-                logging.warning(f"[DEBUG] No 'metrics' key found in message content")
+                logging.warning("[DEBUG] No 'metrics' key found in message content")
 
             # --- FedBN/FedLN: Extract personalized parameters ---
             node_id = msg.metadata.src_node_id

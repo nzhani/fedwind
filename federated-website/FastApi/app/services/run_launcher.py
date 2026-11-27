@@ -12,7 +12,7 @@ import os
 from typing import Dict, Optional
 
 from app.platform_schemas import EnergyType, ExperimentConfig, RunDetail
-from app.services import run_store
+from app.services import demo_runs, run_store
 from app.services.federation_client import FederationClient, FederationUnavailable
 from app.services.site_registry import list_sites
 from app.services.wind_csv import CsvValidationError, validate_wind_csv
@@ -82,6 +82,13 @@ def launch(settings: Settings, config: ExperimentConfig, federation: FederationC
         active = run_store.active_run(settings)
         if active is not None:
             raise LaunchError(409, f"Run '{active.run_id}' is still {active.status}")
+
+        if demo_runs.enabled():
+            # Presentation laptop (DEMO_RUNS=1): no training; the run's files are played back
+            run_id = run_store.new_run_id(config)
+            run_store.create_run(settings, run_id, config)
+            demo_runs.start(settings, run_id, config)
+            return run_store.get_run(settings, run_id)
 
         fed = federation.status()
         if not fed.connected:

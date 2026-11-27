@@ -44,8 +44,10 @@ def test_result_real_units_and_skill(tmp_path):
     }
     res = lg.result(2, best_eval, 100.0, 4, 1000, 10_000, False)
     assert res["status"] == "done" and res["best_round"] == 2 and res["horizon"] == 72
-    assert res["metrics"]["per_site"]["almaty"] == {"mae": 1.0, "rmse": 1.5, "nmae": 0.2, "nrmse": 0.3,
-                                                    "persistence_mae": 2.0, "skill_vs_persistence": 0.5}
+    site = res["metrics"]["per_site"]["almaty"]
+    assert {k: site[k] for k in ("mae", "rmse", "nmae", "nrmse", "persistence_mae", "skill_vs_persistence")} == {
+        "mae": 1.0, "rmse": 1.5, "nmae": 0.2, "nrmse": 0.3, "persistence_mae": 2.0, "skill_vs_persistence": 0.5}
+    assert site["power_nmae"] is None and site["by_lead"] == {}      # older clients: no new metrics, no made-up ones
     assert res["metrics"]["real"]["mae"] == 1.5 and res["metrics"]["real"]["skill_vs_persistence"] == 0.25
     assert json.loads((tmp_path / "r1" / "result.json").read_text())["status"] == "done"
 

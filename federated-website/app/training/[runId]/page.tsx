@@ -47,7 +47,13 @@ function Stat({ icon: Icon, label, value }: { icon: typeof Clock; label: string;
   )
 }
 
-const fmt = (v: number | null | undefined, digits = 3) => (v == null ? "—" : v.toFixed(digits))
+const fmt = (v: unknown, digits = 3) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—")
+
+/** Only the numeric entries (newer results also carry text and nested objects) */
+const numeric = (m: Record<string, unknown> | undefined) =>
+  Object.entries(m ?? {}).filter(([, v]) => typeof v === "number" || v === null) as [string, number | null][]
+
+type LeadMetrics = Record<string, { mae?: number | null; rmse?: number | null; skill?: number | null }>
 
 export default function RunPage() {
   const { isAdmin } = useAuth()
@@ -111,6 +117,9 @@ export default function RunPage() {
   const siteRows = (run?.sites ?? []).map((site) => ({ site, ...run?.clients.find((c) => c.site === site) }))
   const realMetrics = run?.result?.metrics?.real
   const perSite = run?.result?.metrics?.per_site
+  const byLead = realMetrics?.by_lead as LeadMetrics | undefined
+  const powerBasis = typeof realMetrics?.power_basis === "string" ? realMetrics.power_basis : null
+  const siteColumns = perSite ? numeric(Object.values(perSite)[0]).map(([k]) => k) : []
   const energy = runEnergyType(run?.config)
   const energyInfo = ENERGY_TYPES.find((e) => e.value === energy)!
   const unit = displayUnit(last?.val_real?.unit ?? run?.result?.unit) || energyInfo.unit
@@ -245,6 +254,10 @@ export default function RunPage() {
                               <span className="text-green-700 text-xs font-medium">replied</span>
                             ) : c.status === "dropped" ? (
                               <span className="text-red-700 text-xs font-medium">dropped</span>
+                            ) : c.status === "rejected" ? (
+                              <span className="text-red-700 text-xs font-medium" title={c.reason ?? undefined}>
+                                rejected{c.reason ? `: ${c.reason}` : ""}
+                              </span>
                             ) : (
                               <span className="text-muted-foreground text-xs">—</span>
                             )}
@@ -272,7 +285,7 @@ export default function RunPage() {
                 <CardContent className="space-y-4">
                   {realMetrics && (
                     <div className="grid gap-4 sm:grid-cols-5">
-                      {Object.entries(realMetrics).map(([k, v]) => (
+                      {numeric(realMetrics).map(([k, v]) => (
                         <div key={k}>
                           <p className="text-xs uppercase text-muted-foreground">{k.replaceAll("_", " ")}</p>
                           <p className="text-lg font-semibold">{fmt(v)}</p>
@@ -280,12 +293,43 @@ export default function RunPage() {
                       ))}
                     </div>
                   )}
+                  {powerBasis && (
+                    <p className="text-xs text-muted-foreground">
+                      Power errors (power nmae / nrmse) are divided by the capacity of a {powerBasis.replace(", all hours", "")},
+                      over all test hours.
+                    </p>
+                  )}
+                  {byLead && Object.keys(byLead).length > 0 && (
+                    <div>
+                      <p className="mb-2 text-sm font-medium">Errors by lead time</p>
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Hours ahead</TableHead>
+                            <TableHead className="text-right">MAE</TableHead>
+                            <TableHead className="text-right">RMSE</TableHead>
+                            <TableHead className="text-right">Skill vs reference</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {Object.entries(byLead).map(([h, m]) => (
+                            <TableRow key={h}>
+                              <TableCell>{h} h</TableCell>
+                              <TableCell className="text-right">{fmt(m.mae)}</TableCell>
+                              <TableCell className="text-right">{fmt(m.rmse)}</TableCell>
+                              <TableCell className="text-right">{fmt(m.skill)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
                   {perSite && (
                     <Table>
                       <TableHeader>
                         <TableRow>
                           <TableHead>Site</TableHead>
-                          {Object.keys(Object.values(perSite)[0] ?? {}).map((k) => (
+                          {siteColumns.map((k) => (
                             <TableHead key={k} className="text-right uppercase">
                               {k.replaceAll("_", " ")}
                             </TableHead>
@@ -296,9 +340,9 @@ export default function RunPage() {
                         {Object.entries(perSite).map(([site, m]) => (
                           <TableRow key={site}>
                             <TableCell className="capitalize">{site}</TableCell>
-                            {Object.values(m).map((v, i) => (
-                              <TableCell key={i} className="text-right">
-                                {fmt(v)}
+                            {siteColumns.map((k) => (
+                              <TableCell key={k} className="text-right">
+                                {fmt(m[k])}
                               </TableCell>
                             ))}
                           </TableRow>

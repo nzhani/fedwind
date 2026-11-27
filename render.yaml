@@ -1,0 +1,67 @@
+# Render blueprint: the ArqauQuat website, API and database (render.com -> New -> Blueprint).
+#
+# What runs here: pages, accounts, plant registration, admin. What doesn't: the Flower federation and
+# forecast models (they need a GPU server; deploy/docker-compose.yml). Training and forecasts show
+# "not connected". After the first deploy, create an admin in the API service's Shell tab:
+#   python -m app.cli create-admin --email you@org.kz --name "Your Name"
+
+databases:
+  - name: arqauquat-db
+    plan: free
+    databaseName: arqauquat
+    user: arqauquat
+
+services:
+  - type: web
+    name: arqauquat-api
+    runtime: python
+    plan: free
+    rootDir: federated-website/FastApi
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: arqauquat-db
+          property: connectionString
+      # The website's full address, e.g. https://arqauquat-web.onrender.com (Render asks for it at
+      # Apply); links in Telegram messages and site kits use it
+      - key: FRONTEND_URL
+        sync: false
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      - key: ALLOW_REGISTRATION
+        value: "true"
+      # No federation or inference on Render: the pages say "not connected" instead of failing
+      - key: FEDERATION_ADDRESS
+        value: ""
+      - key: INFERENCE_URL_TEMPLATE
+        value: ""
+      - key: INFERENCE_CENTRAL_URL
+        value: ""
+      - key: BOT_TOKEN
+        sync: false
+      - key: SUPPORT_CHAT_ID
+        sync: false
+
+  - type: web
+    name: arqauquat-web
+    runtime: node
+    plan: free
+    rootDir: federated-website
+    buildCommand: npm ci && npm run build
+    startCommand: npm start -- -p $PORT
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # The website forwards /api to the API over Render's private network (set before the build)
+      - key: API_INTERNAL_URL
+        fromService:
+          type: web
+          name: arqauquat-api
+          property: hostport
